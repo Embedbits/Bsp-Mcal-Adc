@@ -1,4 +1,4 @@
-# Template version: 0.0.0
+# Template version: 0.0.1
 # Sets the version of CMakeLists.txt file.
 # Never, under any circumstances, change this line. It is used by
 # the module generation script to identify the template version.
@@ -28,21 +28,21 @@ set( Adc_SourceFiles
 # List of public header files provided by the current library
 set( Adc_PublicHeaders 
     Adc_Types.h
-    Adc_Port.h 
+    Adc_Port.h
 )
 
 
 # List of dependent libraries that are publicly used by the current library
 set( Adc_PublicDependentLibs
-     Gpdma_Lib
+    Gpdma_Lib
 )
 
 
 # List of dependent libraries that are privately used by the current library
 set( Adc_PrivateDependentLibs
-     Rcc_Lib
-     Gpio_Lib
-     Nvic_Lib
+    Rcc_Lib
+    Gpio_Lib
+    Nvic_Lib
 )
 
 
@@ -84,10 +84,9 @@ target_include_directories( Adc_Lib
     PUBLIC
         $<BUILD_INTERFACE:${PUBLIC_HEADERS_DIR}>
         $<INSTALL_INTERFACE:include>
-        Adc_PublicIncludeDirs
+        ${Adc_PublicIncludeDirs}
     PRIVATE
-        ${Adc_IncludeDirs}
-        Adc_PrivateIncludeDirs
+        ${Adc_PrivateIncludeDirs}
 )
 
 

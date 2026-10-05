@@ -248,9 +248,14 @@ void Ut_Adc_Init_NoPeripheralUsed_ClockConfiguredOnly( void )
  * \par Expected results
  * - ADC_REQUEST_ERROR is returned.
  * - ADC1 is not enabled (ADEN = 0).
+ * - Ignored on MCUs with one ADC (STM32H503 - test function exists always, the
+ *   runner collects test functions without preprocessor).
  */
 void Ut_Adc_Init_PeripheralIdMismatch_ReturnsError( void )
 {
+#if !defined(ADC2)
+    TEST_IGNORE_MESSAGE( "MCU has only one ADC" );
+#else
     adc_Config_t config = { 0 };
 
     config.ClockSource  = ADC_CLK_SRC_HCLK;
@@ -262,6 +267,7 @@ void Ut_Adc_Init_PeripheralIdMismatch_ReturnsError( void )
 
     TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Init( &config ) );
     TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->CR & ADC_CR_ADEN );
+#endif /* ADC2 */
 }
 
 
@@ -1600,25 +1606,73 @@ void Ut_Adc_AwdInit_Awd1Regular_ChannelsThresholdsAndFilter( void )
 /**
  * \brief   Adc_AwdInit() configures AWD2 monitoring all channels.
  *
- * \details Initializes AWD2, mode all channels, thresholds 10 - 200, no filter.
+ * \details Initializes AWD2, mode all channels, thresholds 160 - 3200 (12 bit
+ *          resolution), no filter.
+ * \note    Bug AB#530: AWD2 / AWD3 compare 8 MSB of the result - thresholds were
+ *          written unchanged (bits 8 - 11 to reserved bits).
  *
  * \par Expected results
  * - AWD2 monitors all regular and injected channels.
- * - Thresholds read back 10 / 200.
+ * - TR2 holds 8 bit thresholds 10 / 200, thresholds read back 160 / 3200.
  */
 void Ut_Adc_AwdInit_Awd2AllChannels_ThresholdsSet( void )
 {
     adc_AwdConfig_t    awdConfig = { .AwdId = ADC_AWD_2, .AwdMode = ADC_AWD_MODE_ALL,
-                                     .AwdLowThreshold = 10u, .AwdHighThreshold = 200u, .AwdFilter = ADC_AWD_FILTER_NONE };
+                                     .AwdLowThreshold = 160u, .AwdHighThreshold = 3200u, .AwdFilter = ADC_AWD_FILTER_NONE };
     adc_AwdThreshold_t low       = 0u;
     adc_AwdThreshold_t high      = 0u;
 
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
 
     TEST_ASSERT_EQUAL_HEX32( LL_ADC_AWD_ALL_CHANNELS_REG_INJ, LL_ADC_GetAnalogWDMonitChannels( UT_ADC_REG, LL_ADC_AWD2 ) );
+    TEST_ASSERT_EQUAL_HEX32( ( 200u << ADC_TR2_HT2_Pos ) | ( 10u << ADC_TR2_LT2_Pos ), UT_ADC_REG->TR2 );
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_AwdThresholds( UT_ADC_PERIPH, ADC_AWD_2, &low, &high ) );
-    TEST_ASSERT_EQUAL_UINT16( 10u, low );
-    TEST_ASSERT_EQUAL_UINT16( 200u, high );
+    TEST_ASSERT_EQUAL_UINT16( 160u, low );
+    TEST_ASSERT_EQUAL_UINT16( 3200u, high );
+}
+
+
+/**
+ * \brief   Analog watchdog thresholds are converted with the configured resolution.
+ *
+ * \details 8 bit resolution (CFGR.RES preset): AWD1 thresholds 20 - 250, AWD3
+ *          thresholds 20 - 250. 12 bit resolution: AWD3 thresholds 100 - 4000,
+ *          threshold above the maximum of 8 bit resolution.
+ * \note    Bug AB#530: thresholds were not converted to the register format of the
+ *          watch-dog (AWD1 12 bit, AWD2 / AWD3 8 bit).
+ *
+ * \par Expected results
+ * - 8 bit: TR1 holds thresholds left aligned to 12 bits (320 / 4000), TR3 holds 20 / 250,
+ *   both read back 20 / 250. Threshold 256: ADC_REQUEST_ERROR.
+ * - 12 bit: AWD3 thresholds read back 96 / 4000 (4 LSB ignored by HW).
+ */
+void Ut_Adc_Set_AwdThresholds_Resolution_ConvertedToRegisterFormat( void )
+{
+    adc_AwdThreshold_t low  = 0u;
+    adc_AwdThreshold_t high = 0u;
+
+    LL_ADC_SetResolution( UT_ADC_REG, LL_ADC_RESOLUTION_8B );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_AwdThresholds( UT_ADC_PERIPH, ADC_AWD_1, 20u, 250u ) );
+    TEST_ASSERT_EQUAL_HEX32( ( 4000u << ADC_TR1_HT1_Pos ) | ( 320u << ADC_TR1_LT1_Pos ), UT_ADC_REG->TR1 & ( ADC_TR1_HT1 | ADC_TR1_LT1 ) );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_AwdThresholds( UT_ADC_PERIPH, ADC_AWD_1, &low, &high ) );
+    TEST_ASSERT_EQUAL_UINT16( 20u, low );
+    TEST_ASSERT_EQUAL_UINT16( 250u, high );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_AwdThresholds( UT_ADC_PERIPH, ADC_AWD_3, 20u, 250u ) );
+    TEST_ASSERT_EQUAL_HEX32( ( 250u << ADC_TR3_HT3_Pos ) | ( 20u << ADC_TR3_LT3_Pos ), UT_ADC_REG->TR3 );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_AwdThresholds( UT_ADC_PERIPH, ADC_AWD_3, &low, &high ) );
+    TEST_ASSERT_EQUAL_UINT16( 20u, low );
+    TEST_ASSERT_EQUAL_UINT16( 250u, high );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Set_AwdThresholds( UT_ADC_PERIPH, ADC_AWD_1, 0u, 256u ) );
+
+    LL_ADC_SetResolution( UT_ADC_REG, LL_ADC_RESOLUTION_12B );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_AwdThresholds( UT_ADC_PERIPH, ADC_AWD_3, 100u, 4000u ) );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_AwdThresholds( UT_ADC_PERIPH, ADC_AWD_3, &low, &high ) );
+    TEST_ASSERT_EQUAL_UINT16( 96u, low );
+    TEST_ASSERT_EQUAL_UINT16( 4000u, high );
 }
 
 

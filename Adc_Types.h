@@ -1,4 +1,9 @@
 /**
+ * \defgroup Adc Adc
+ * \brief Adc module
+ */
+
+/**
  * \author Mr.Nobody
  * \file Adc_Types.h
  * \ingroup Adc

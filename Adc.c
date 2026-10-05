@@ -90,6 +90,8 @@ static adc_RequestState_t Adc_Check_DataConfig        ( adc_PeriphId_t periphId,
 static adc_RequestState_t Adc_Set_XferInit            ( adc_PeriphId_t periphId, const adc_DataConfig_t * const dataConfig );
 static adc_RequestState_t Adc_Set_XferStart           ( adc_PeriphId_t periphId );
 static adc_RequestState_t Adc_Set_XferStop            ( adc_PeriphId_t periphId );
+static uint32_t           Adc_Get_AwdThresholdReg     ( adc_AwdId_t awdId, uint32_t resShift, uint32_t rawThreshold );
+static uint32_t           Adc_Get_AwdThresholdRaw     ( adc_AwdId_t awdId, uint32_t resShift, uint32_t regThreshold );
 
 /* ========================== SYMBOLIC CONSTANTS ============================ */
 
@@ -125,6 +127,16 @@ static adc_RequestState_t Adc_Set_XferStop            ( adc_PeriphId_t periphId 
 
 /** Channel input without minimum sampling time requirement */
 #define ADC_SAMPLING_MIN_NONE_NS     ( 0u )
+
+
+/** Maximal threshold of AWD1 (12 bit comparison) */
+#define ADC_AWD1_THRESHOLD_MAX       ( 0x0FFFu )
+
+/** Shift of 12 bit value to the configured resolution (0 - 12 bit, 2 - 10 bit, 4 - 8 bit, 6 - 6 bit) */
+#define ADC_AWD_RES_SHIFT( llRes )   ( ( (llRes) >> ADC_CFGR_RES_Pos ) * 2u )
+
+/** Shift of 12 bit value to 8 bit threshold of AWD2 / AWD3 */
+#define ADC_AWD23_REG_SHIFT          ( 4u )
 
 
 /** Count of microseconds in one second */
@@ -448,7 +460,7 @@ static const uint32_t adc_ClkDivAsyncLut[ ADC_CLK_DIV_CNT ] =
 };
 
 
-/** adc_RegTriggerId_t -> LL_ADC_REG_TRIG_*. Entries follow the exact order and #if guarding
+/** adc_RegTriggerId_t -> LL_ADC_REG_TRIG_*. Entries follow the exact order and \#if guarding
  *  of adc_RegTriggerId_t in Adc_Types.h, so the table always matches the enum variant that is
  *  actually compiled in (TIM4 / TIM8 / TIM15 / PLAY1 availability). */
 static const uint32_t adc_RegTriggerSrcLut[ ] =
@@ -489,7 +501,7 @@ static const uint32_t adc_RegTriggerSrcLut[ ] =
 _Static_assert( ADC_REG_TRIGGER_CNT == ( sizeof(adc_RegTriggerSrcLut) / sizeof(uint32_t) ), "Adc: adc_RegTriggerSrcLut has incorrect size." );
 
 
-/** adc_InjTriggerId_t -> LL_ADC_INJ_TRIG_*. Entries follow the exact order and #if guarding
+/** adc_InjTriggerId_t -> LL_ADC_INJ_TRIG_*. Entries follow the exact order and \#if guarding
  *  of adc_InjTriggerId_t in Adc_Types.h. ADC_INJ_TRIGGER_AUTO has no own trigger source -
  *  auto-injected mode (JAUTO) requires the injected external trigger disabled (JEXTEN = 0). */
 static const uint32_t adc_InjTriggerSrcLut[ ] =
@@ -3099,6 +3111,15 @@ adc_RequestState_t Adc_AwdInit( adc_PeriphId_t periphId, adc_AwdConfig_t * const
 /**
  * \brief Sets an Analog Watch-dog's low/high comparison thresholds
  *
+ * Thresholds are raw ADC values of the configured resolution and are converted to
+ * the register format of the watch-dog:
+ * - AWD1 compares 12 bit values - thresholds are left aligned to 12 bits.
+ * - AWD2 / AWD3 compare the 8 most significant bits of the result - thresholds
+ *   are converted to 8 bits, lower bits of 12 / 10 bit thresholds are ignored by
+ *   HW (\ref Adc_Get_AwdThresholds returns the effective thresholds).
+ *
+ * \pre   Resolution of the peripheral shall be configured, conversion is done with
+ *        the resolution at the time of the call.
  * \pre   No regular or injected conversion may be ongoing on the peripheral
  *        (ADSTART = 0 and JADSTART = 0). Otherwise \ref ADC_REQUEST_ERROR is returned
  *        and no register is modified.
@@ -3109,7 +3130,8 @@ adc_RequestState_t Adc_AwdInit( adc_PeriphId_t periphId, adc_AwdConfig_t * const
  * \param highThreshold [in]: Upper comparison threshold as raw ADC value (\ref adc_AwdThreshold_t)
  *
  * \return Function processing state. Returns \ref ADC_REQUEST_OK if request
- *         was processed without problems. Otherwise returns \ref ADC_REQUEST_ERROR.
+ *         was processed without problems. Otherwise (also threshold above the
+ *         maximal value of the resolution) returns \ref ADC_REQUEST_ERROR.
  */
 adc_RequestState_t Adc_Set_AwdThresholds( adc_PeriphId_t periphId,
                                           adc_AwdId_t awdId,
@@ -3121,21 +3143,26 @@ adc_RequestState_t Adc_Set_AwdThresholds( adc_PeriphId_t periphId,
     if( ( ADC_PERIPH_CNT > periphId ) &&
         ( ADC_AWD_CNT    > awdId    )    )
     {
-        const adc_RequestState_t convState = Adc_Check_ConversionStopped( periphId );
+        ADC_TypeDef * const      periphReg  = adc_PeriphConf[ periphId ].PeriphReg;
+        const adc_RequestState_t convState  = Adc_Check_ConversionStopped( periphId );
+        const uint32_t           resShift   = ADC_AWD_RES_SHIFT( LL_ADC_GetResolution( periphReg ) );
+        const uint32_t           rawMax     = ADC_AWD1_THRESHOLD_MAX >> resShift;
+        const uint32_t           highRegVal = Adc_Get_AwdThresholdReg( awdId, resShift, (uint32_t)highThreshold );
+        const uint32_t           lowRegVal  = Adc_Get_AwdThresholdReg( awdId, resShift, (uint32_t)lowThreshold  );
 
-        if( ADC_REQUEST_OK == convState )
+        if( ( ADC_REQUEST_OK == convState              ) &&
+            ( rawMax         >= (uint32_t)highThreshold ) &&
+            ( rawMax         >= (uint32_t)lowThreshold  )    )
         {
-            ADC_TypeDef * const periphReg = adc_PeriphConf[ periphId ].PeriphReg;
-
-            LL_ADC_ConfigAnalogWDThresholds( periphReg, adc_AwdIdLut[ awdId ], highThreshold, lowThreshold );
+            LL_ADC_ConfigAnalogWDThresholds( periphReg, adc_AwdIdLut[ awdId ], highRegVal, lowRegVal );
 
             for( adc_TimeoutCnt_t iterationCnt = 0u; ADC_TIMEOUT_RAW > iterationCnt; iterationCnt ++ )
             {
                 const uint32_t highThresholdReg = LL_ADC_GetAnalogWDThresholds( periphReg, adc_AwdIdLut[ awdId ], LL_ADC_AWD_THRESHOLD_HIGH );
                 const uint32_t lowThresholdReg  = LL_ADC_GetAnalogWDThresholds( periphReg, adc_AwdIdLut[ awdId ], LL_ADC_AWD_THRESHOLD_LOW  );
 
-                if( ( (uint32_t)highThreshold == highThresholdReg ) &&
-                    ( (uint32_t)lowThreshold  == lowThresholdReg  )    )
+                if( ( highRegVal == highThresholdReg ) &&
+                    ( lowRegVal  == lowThresholdReg  )    )
                 {
                     retState = ADC_REQUEST_OK;
                     break;
@@ -3149,7 +3176,7 @@ adc_RequestState_t Adc_Set_AwdThresholds( adc_PeriphId_t periphId,
         }
         else
         {
-            /* Conversion is ongoing, configuration change is not allowed */
+            /* Conversion is ongoing or threshold out of range of the resolution */
             retState = ADC_REQUEST_ERROR;
         }
     }
@@ -3164,6 +3191,10 @@ adc_RequestState_t Adc_Set_AwdThresholds( adc_PeriphId_t periphId,
 
 /**
  * \brief Reads back an Analog Watch-dog's low/high comparison thresholds
+ *
+ * Thresholds are returned as raw ADC values of the current resolution (effective
+ * thresholds - AWD2 / AWD3 compare only 8 most significant bits, see
+ * \ref Adc_Set_AwdThresholds).
  *
  * \param periphId       [in]: ADC peripheral identification, value from \ref adc_PeriphId_t
  * \param awdId          [in]: Analog Watch-dog identification, value from \ref adc_AwdId_t
@@ -3185,8 +3216,11 @@ adc_RequestState_t Adc_Get_AwdThresholds( adc_PeriphId_t periphId,
         ( ADC_NULL_PTR  != lowThreshold  ) &&
         ( ADC_NULL_PTR  != highThreshold )    )
     {
-        *highThreshold = (adc_AwdThreshold_t)LL_ADC_GetAnalogWDThresholds( adc_PeriphConf[ periphId ].PeriphReg, adc_AwdIdLut[ awdId ], LL_ADC_AWD_THRESHOLD_HIGH );
-        *lowThreshold  = (adc_AwdThreshold_t)LL_ADC_GetAnalogWDThresholds( adc_PeriphConf[ periphId ].PeriphReg, adc_AwdIdLut[ awdId ], LL_ADC_AWD_THRESHOLD_LOW );
+        ADC_TypeDef * const periphReg = adc_PeriphConf[ periphId ].PeriphReg;
+        const uint32_t      resShift  = ADC_AWD_RES_SHIFT( LL_ADC_GetResolution( periphReg ) );
+
+        *highThreshold = (adc_AwdThreshold_t)Adc_Get_AwdThresholdRaw( awdId, resShift, LL_ADC_GetAnalogWDThresholds( periphReg, adc_AwdIdLut[ awdId ], LL_ADC_AWD_THRESHOLD_HIGH ) );
+        *lowThreshold  = (adc_AwdThreshold_t)Adc_Get_AwdThresholdRaw( awdId, resShift, LL_ADC_GetAnalogWDThresholds( periphReg, adc_AwdIdLut[ awdId ], LL_ADC_AWD_THRESHOLD_LOW  ) );
         retState       = ADC_REQUEST_OK;
     }
 
@@ -3313,6 +3347,71 @@ adc_RequestState_t Adc_Get_AwdFilter( adc_PeriphId_t periphId, adc_AwdId_t awdId
 
 
 /* =========================== LOCAL FUNCTIONS ============================== */
+
+/**
+ * \brief Converts raw ADC value of the resolution to threshold register value
+ *        of the analog watch-dog (AWD1 12 bit, AWD2 / AWD3 8 bit comparison).
+ *
+ * \param awdId        [in]: Analog Watch-dog identification, value from \ref adc_AwdId_t
+ * \param resShift     [in]: Shift of 12 bit value to the resolution (\ref ADC_AWD_RES_SHIFT)
+ * \param rawThreshold [in]: Raw threshold of the resolution
+ *
+ * \return Threshold register value.
+ */
+static uint32_t Adc_Get_AwdThresholdReg( adc_AwdId_t awdId, uint32_t resShift, uint32_t rawThreshold )
+{
+    uint32_t regThreshold = 0u;
+
+    if( ADC_AWD_1 == awdId )
+    {
+        /* AWD1 compares 12 bit values - raw value left aligned to 12 bits */
+        regThreshold = rawThreshold << resShift;
+    }
+    else if( ADC_AWD23_REG_SHIFT >= resShift )
+    {
+        /* AWD2 / AWD3 compare 8 MSB - 12 / 10 / 8 bit value shifted down */
+        regThreshold = rawThreshold >> ( ADC_AWD23_REG_SHIFT - resShift );
+    }
+    else
+    {
+        /* 6 bit resolution - value shifted up to 8 bits */
+        regThreshold = rawThreshold << ( resShift - ADC_AWD23_REG_SHIFT );
+    }
+
+    return ( regThreshold );
+}
+
+
+/**
+ * \brief Converts threshold register value of the analog watch-dog to raw ADC
+ *        value of the resolution (reverse of \ref Adc_Get_AwdThresholdReg).
+ *
+ * \param awdId        [in]: Analog Watch-dog identification, value from \ref adc_AwdId_t
+ * \param resShift     [in]: Shift of 12 bit value to the resolution (\ref ADC_AWD_RES_SHIFT)
+ * \param regThreshold [in]: Threshold register value
+ *
+ * \return Raw threshold of the resolution.
+ */
+static uint32_t Adc_Get_AwdThresholdRaw( adc_AwdId_t awdId, uint32_t resShift, uint32_t regThreshold )
+{
+    uint32_t rawThreshold = 0u;
+
+    if( ADC_AWD_1 == awdId )
+    {
+        rawThreshold = regThreshold >> resShift;
+    }
+    else if( ADC_AWD23_REG_SHIFT >= resShift )
+    {
+        rawThreshold = regThreshold << ( ADC_AWD23_REG_SHIFT - resShift );
+    }
+    else
+    {
+        rawThreshold = regThreshold >> ( resShift - ADC_AWD23_REG_SHIFT );
+    }
+
+    return ( rawThreshold );
+}
+
 
 /**
  * \brief Checks that neither a regular nor an injected conversion is ongoing
