@@ -33,7 +33,24 @@
 #include "MockGpio_Port.h"                  /* GPIO module mock               */
 #include "MockGpdma_Port.h"                 /* GPDMA module mock              */
 #include "Stm32_adc.h"                      /* ADC registers definition       */
+#include <string.h>                         /* memset                         */
 /* ============================= TYPEDEFS =================================== */
+
+/** \brief Record of the calls of one GPDMA channel (Gpdma_* stubs) */
+typedef struct
+{
+    uint32_t            ActiveCnt;      /**< Gpdma_Set_ChannelActive() calls          */
+    uint32_t            InactiveCnt;    /**< Gpdma_Set_ChannelInactive() calls        */
+    uint32_t            IrqOnCnt;       /**< Gpdma_Set_InterruptActive() calls        */
+    uint32_t            IrqOffCnt;      /**< Gpdma_Set_InterruptInactive() calls      */
+    uint32_t            PrioCnt;        /**< Gpdma_Set_Priority() calls               */
+    uint32_t            HalfIsrCnt;     /**< Gpdma_Set_HalfTransferIsrHandler() calls */
+    uint32_t            HalfOnCnt;      /**< Gpdma_Set_HalfTransferIrqActive() calls  */
+    uint32_t            HalfOffCnt;     /**< Gpdma_Set_HalfTransferIrqInactive() calls */
+    gpdma_Priority_t    Prio;           /**< Last priority                            */
+    gpdma_BlockSize_t   BlockSize;      /**< Last block size                          */
+    gpdma_DstAddr_t     DstAddr;        /**< Last destination address                 */
+}   utAdc_DmaChannel_t;
 
 /* ======================= FORWARD DECLARATIONS ============================= */
 
@@ -49,6 +66,21 @@ static adc_PeriphConfig_t   Ut_Adc_Get_PeriphConfig     ( adc_TransferMode_t xfe
 static void                 Ut_Adc_PeriphInit           ( adc_PeriphConfig_t * const periphConfig );
 static void                 Ut_Adc_Set_Enabled          ( void );
 static void                 Ut_Adc_Call_Isr             ( uint32_t isrFlags );
+static void                 Ut_Adc_Setup_DmaMocks       ( void );
+static adc_PeriphConfig_t   Ut_Adc_Get_DmaPeriphConfig  ( void );
+static utAdc_DmaChannel_t * Ut_Adc_Get_DmaChannel       ( const adc_DataConfig_t * const dataConfig );
+static gpdma_RequestState_t Ut_Adc_DmaDefaultConfigStub ( gpdma_ConfigStruct_t * const configStruct, int callCnt );
+static gpdma_RequestState_t Ut_Adc_DmaInitStub          ( gpdma_ConfigStruct_t * const configStruct, int callCnt );
+static gpdma_RequestState_t Ut_Adc_DmaActiveStub        ( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, int callCnt );
+static gpdma_RequestState_t Ut_Adc_DmaInactiveStub      ( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, int callCnt );
+static gpdma_RequestState_t Ut_Adc_DmaIrqOnStub         ( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, int callCnt );
+static gpdma_RequestState_t Ut_Adc_DmaIrqOffStub        ( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, int callCnt );
+static gpdma_RequestState_t Ut_Adc_DmaPrioStub          ( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, gpdma_Priority_t channelPrio, int callCnt );
+static gpdma_RequestState_t Ut_Adc_DmaHalfIsrStub       ( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, gpdma_IsrCallback * const irqHandler, int callCnt );
+static gpdma_RequestState_t Ut_Adc_DmaHalfOnStub        ( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, int callCnt );
+static gpdma_RequestState_t Ut_Adc_DmaHalfOffStub       ( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, int callCnt );
+static gpdma_RequestState_t Ut_Adc_DmaBlockSizeStub     ( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, gpdma_BlockSize_t blockSize, int callCnt );
+static gpdma_RequestState_t Ut_Adc_DmaDstAddrStub       ( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, gpdma_DstAddr_t destAddr, int callCnt );
 
 static void                 Ut_Adc_HalfCallback         ( void );
 static void                 Ut_Adc_CompleteCallback     ( void );
@@ -78,6 +110,18 @@ static void                 Ut_Adc_ErrorCallback        ( adc_ErrorId_t errorId 
 /** Size of the test data buffer */
 #define UT_ADC_BUF_SIZE                     ( 8u )
 
+/** Count of samples of the DMA test buffers */
+#define UT_ADC_DMA_SAMPLES                  ( 4u )
+
+/** Count of GPDMA configurations stored by the Gpdma_Init() stub */
+#define UT_ADC_DMA_CFG_CNT                  ( 4u )
+
+/** Count of GPDMA channels recorded per GPDMA peripheral */
+#define UT_ADC_DMA_CHANNELS                 ( 16u )
+
+/** GPDMA errors reported to the user by the module */
+#define UT_ADC_DMA_ERROR_MASK               ( GPDMA_ERROR_TRANSFER | GPDMA_ERROR_CONFIG_UPDATE | GPDMA_ERROR_CONFIG_ERROR | GPDMA_ERROR_TRIG_OVERRUN )
+
 /** ADC CR bits written by the module and handled by HW model */
 #define UT_ADC_CR_HW_BITS                   ( ADC_CR_ADCAL | ADC_CR_ADDIS | ADC_CR_ADSTP | ADC_CR_JADSTP )
 
@@ -103,6 +147,27 @@ static uint32_t                 utAdc_ErrorCnt;
 
 /** Parameter of the last error callback */
 static adc_ErrorId_t            utAdc_LastError;
+
+/** GPDMA configurations of Gpdma_Init() calls (structure and transfer configuration) */
+static gpdma_ConfigStruct_t     utAdc_DmaConfig[ UT_ADC_DMA_CFG_CNT ];
+static gpdma_TransferConfig_t   utAdc_DmaXferConfig[ UT_ADC_DMA_CFG_CNT ];
+static uint32_t                 utAdc_DmaInitCnt;
+
+/** Return values of the Gpdma_Get_DefaultConfig(), Gpdma_Init(), Gpdma_Set_ChannelActive() and Gpdma_Set_ChannelInactive() stubs */
+static gpdma_RequestState_t     utAdc_DmaDefaultState;
+static gpdma_RequestState_t     utAdc_DmaInitState;
+static gpdma_RequestState_t     utAdc_DmaActiveState;
+static gpdma_RequestState_t     utAdc_DmaInactiveState;
+
+/** Records of GPDMA channel calls */
+static utAdc_DmaChannel_t       utAdc_DmaChannel[ GPDMA_PERIPH_CNT ][ UT_ADC_DMA_CHANNELS ];
+
+/**
+ * Selector of the GPDMA channel of the next DMA configuration. The GPDMA channel ownership of
+ * the module is static (a configured channel is reused, Gpdma_Init() is not called again), so
+ * every DMA test configures a channel different from the previous test.
+ */
+static uint32_t                 utAdc_DmaChannelSel;
 
 /* ============================ TEST FIXTURE ================================ */
 
@@ -1720,6 +1785,569 @@ void Ut_Adc_AwdInit_UnsupportedModes_ReturnsError( void )
     TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Set_AwdFilter( UT_ADC_PERIPH, ADC_AWD_1, ADC_AWD_FILTER_2 ) );
 }
 
+/* ----------------------------- DMA mode ----------------------------------- */
+
+/**
+ * \brief   DMA data configuration initializes the GPDMA channel and limits the ADC DMA requests.
+ *
+ * \details Initializes ADC1 in DMA mode (one shot buffer of 4 samples, half transfer callback,
+ *          high priority) and evaluates the configuration passed to Gpdma_Init().
+ *
+ * \par Expected results
+ * - Gpdma_Init() 1x: peripheral to memory, request ADC1, 16-bit, source ADC DR (static),
+ *   destination the data buffer (increment), block of 8 bytes, priority of the configuration.
+ * - Transfer complete, half transfer and error handlers registered, all GPDMA errors reported.
+ * - GPDMA channel interrupt enabled, ADC DMA requests limited (DMNGT = one shot), ADC ISR registered.
+ */
+void Ut_Adc_PeriphInit_DmaOneShot_ChannelInitializedAndDmaRequestsLimited( void )
+{
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+    utAdc_DmaChannel_t * channel    = Ut_Adc_Get_DmaChannel( &periphConfig.DataConfig );
+
+    periphConfig.DataConfig.DmaPriority = ADC_DMA_PRIORITY_HIGH;
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_DmaInitCnt );
+    TEST_ASSERT_EQUAL( (gpdma_PeriphId_t)periphConfig.DataConfig.DmaPeriphId, utAdc_DmaConfig[ 0u ].PeriphId );
+    TEST_ASSERT_EQUAL( (gpdma_ChannelId_t)periphConfig.DataConfig.DmaChannelId, utAdc_DmaConfig[ 0u ].ChannelId );
+    TEST_ASSERT_EQUAL( (gpdma_Priority_t)ADC_DMA_PRIORITY_HIGH, utAdc_DmaConfig[ 0u ].ChannelPrio );
+
+    TEST_ASSERT_EQUAL( GPDMA_DIR_PERIPH_TO_MEMORY,  utAdc_DmaXferConfig[ 0u ].Direction );
+    TEST_ASSERT_EQUAL( GPDMA_REQ_ADC1,              utAdc_DmaXferConfig[ 0u ].RequestSource );
+    TEST_ASSERT_EQUAL_UINT32( UT_ADC_DMA_SAMPLES * sizeof( adc_Data_t ), utAdc_DmaXferConfig[ 0u ].BlockSize );
+    TEST_ASSERT_EQUAL_HEX32( (uint32_t)(uintptr_t)&UT_ADC_REG->DR, utAdc_DmaXferConfig[ 0u ].SourceAddr );
+    TEST_ASSERT_EQUAL( GPDMA_ADDR_STATIC,           utAdc_DmaXferConfig[ 0u ].SourceAddrMode );
+    TEST_ASSERT_EQUAL( GPDMA_DATA_SIZE_16BITS,      utAdc_DmaXferConfig[ 0u ].SourceDataSize );
+    TEST_ASSERT_EQUAL_HEX32( (uint32_t)(uintptr_t)utAdc_Buffer, utAdc_DmaXferConfig[ 0u ].DestinationAddr );
+    TEST_ASSERT_EQUAL( GPDMA_ADDR_INCREMENT,        utAdc_DmaXferConfig[ 0u ].DestinationAddrMode );
+    TEST_ASSERT_EQUAL( GPDMA_DATA_SIZE_16BITS,      utAdc_DmaXferConfig[ 0u ].DestinationDataSize );
+
+    TEST_ASSERT_NOT_NULL( utAdc_DmaConfig[ 0u ].TransferCompleteIsr );
+    TEST_ASSERT_NOT_NULL( utAdc_DmaConfig[ 0u ].HalfTransferIsr );
+    TEST_ASSERT_NOT_NULL( utAdc_DmaConfig[ 0u ].ErrorIsr );
+    TEST_ASSERT_EQUAL( UT_ADC_DMA_ERROR_MASK, utAdc_DmaConfig[ 0u ].ErrorMask );
+
+    TEST_ASSERT_EQUAL_UINT32( 1u, channel->IrqOnCnt );
+    TEST_ASSERT_EQUAL_HEX32( LL_ADC_REG_DMA_TRANSFER_LIMITED, LL_ADC_REG_GetDMATransfer( UT_ADC_REG ) );
+    TEST_ASSERT_NOT_NULL( utAdc_Isr );
+}
+
+
+/**
+ * \brief   Circular buffer keeps the ADC DMA requests unlimited.
+ *
+ * \details Initializes ADC1 in DMA mode with circular buffer.
+ *
+ * \par Expected results
+ * - ADC DMA requests unlimited (DMNGT = circular), GPDMA channel initialized 1x.
+ */
+void Ut_Adc_PeriphInit_DmaCircular_DmaRequestsUnlimited( void )
+{
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+
+    periphConfig.DataConfig.BufferMode = ADC_BUFFER_MODE_CIRCULAR;
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_DmaInitCnt );
+    TEST_ASSERT_EQUAL_HEX32( LL_ADC_REG_DMA_TRANSFER_UNLIMITED, LL_ADC_REG_GetDMATransfer( UT_ADC_REG ) );
+}
+
+
+/**
+ * \brief   Configuration without half transfer callback does not register the half transfer handler.
+ *
+ * \details Initializes ADC1 in DMA mode without HalfTransferCallback.
+ *
+ * \par Expected results
+ * - Gpdma_Init() 1x without half transfer handler, transfer complete handler registered.
+ */
+void Ut_Adc_PeriphInit_DmaWithoutHalfCallback_NoHalfTransferHandler( void )
+{
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+
+    periphConfig.DataConfig.HalfTransferCallback = NULL;
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_DmaInitCnt );
+    TEST_ASSERT_NULL( utAdc_DmaConfig[ 0u ].HalfTransferIsr );
+    TEST_ASSERT_NOT_NULL( utAdc_DmaConfig[ 0u ].TransferCompleteIsr );
+}
+
+
+/**
+ * \brief   GPDMA initialization failures are reported.
+ *
+ * \details Initializes ADC1 in DMA mode with failing Gpdma_Init(), then with failing
+ *          Gpdma_Get_DefaultConfig() (every initialization uses another GPDMA channel).
+ *
+ * \par Expected results
+ * - Adc_PeriphInit() returns ADC_REQUEST_ERROR, the channel interrupt is not enabled.
+ * - Default configuration failure: Gpdma_Init() is not called.
+ */
+void Ut_Adc_PeriphInit_DmaGpdmaInitFailure_ReturnsError( void )
+{
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+    utAdc_DmaChannel_t * channel    = Ut_Adc_Get_DmaChannel( &periphConfig.DataConfig );
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_Ignore_PeriphMocks();
+    Ut_Adc_Set_ModelActive();
+    utAdc_DmaInitState = GPDMA_REQUEST_ERROR;
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_PeriphInit( &periphConfig ) );
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_DmaInitCnt );
+    TEST_ASSERT_EQUAL_UINT32( 0u, channel->IrqOnCnt );
+}
+
+
+/**
+ * \brief   Missing GPDMA default configuration is reported.
+ *
+ * \details Gpdma_Get_DefaultConfig() returns error.
+ *
+ * \par Expected results
+ * - Adc_PeriphInit() returns ADC_REQUEST_ERROR, Gpdma_Init() is not called.
+ */
+void Ut_Adc_PeriphInit_DmaDefaultConfigFailure_ReturnsErrorWithoutInit( void )
+{
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_Ignore_PeriphMocks();
+    Ut_Adc_Set_ModelActive();
+    utAdc_DmaDefaultState = GPDMA_REQUEST_ERROR;
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_PeriphInit( &periphConfig ) );
+    TEST_ASSERT_EQUAL_UINT32( 0u, utAdc_DmaInitCnt );
+}
+
+
+/**
+ * \brief   Invalid DMA peripheral or priority is rejected.
+ *
+ * \details Initializes ADC1 in DMA mode with invalid GPDMA peripheral, then with invalid priority.
+ *
+ * \par Expected results
+ * - Adc_PeriphInit() returns ADC_REQUEST_ERROR, Gpdma_Init() is not called.
+ */
+void Ut_Adc_PeriphInit_DmaInvalidPeriphOrPriority_ReturnsErrorWithoutInit( void )
+{
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_Ignore_PeriphMocks();
+
+    periphConfig.DataConfig.DmaPeriphId = ADC_DMA_PERIPH_CNT;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_PeriphInit( &periphConfig ) );
+
+    periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+    periphConfig.DataConfig.DmaPriority = (adc_DmaPriority_t)GPDMA_PRIORITY_CNT;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_PeriphInit( &periphConfig ) );
+
+    TEST_ASSERT_EQUAL_UINT32( 0u, utAdc_DmaInitCnt );
+}
+
+
+/**
+ * \brief   Configured GPDMA channel is reused, priority and half transfer handler are updated.
+ *
+ * \details Initializes DMA mode, then configures it again with the same channel and another
+ *          priority (Adc_Set_DataConfig()).
+ *
+ * \par Expected results
+ * - Gpdma_Init() called only 1x (first configuration).
+ * - Second configuration: Gpdma_Set_Priority() with the new priority, half transfer handler
+ *   registered and its interrupt enabled, GPDMA interrupt enabled again.
+ */
+void Ut_Adc_Set_DataConfig_DmaSameChannel_PriorityAndHalfHandlerUpdatedWithoutInit( void )
+{
+    adc_PeriphConfig_t   periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+    adc_DataConfig_t     dataConfig   = periphConfig.DataConfig;
+    utAdc_DmaChannel_t * channel      = Ut_Adc_Get_DmaChannel( &dataConfig );
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_DmaInitCnt );
+
+    dataConfig.DmaPriority = ADC_DMA_PRIORITY_VERYHIGH;
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_DataConfig( UT_ADC_PERIPH, &dataConfig ) );
+
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_DmaInitCnt );
+    TEST_ASSERT_EQUAL_UINT32( 1u, channel->PrioCnt );
+    TEST_ASSERT_EQUAL( (gpdma_Priority_t)ADC_DMA_PRIORITY_VERYHIGH, channel->Prio );
+    TEST_ASSERT_EQUAL_UINT32( 1u, channel->HalfIsrCnt );
+    TEST_ASSERT_EQUAL_UINT32( 1u, channel->HalfOnCnt );
+    TEST_ASSERT_EQUAL_UINT32( 0u, channel->HalfOffCnt );
+    TEST_ASSERT_EQUAL_UINT32( 2u, channel->IrqOnCnt );
+}
+
+
+/**
+ * \brief   Reused GPDMA channel without half transfer callback disables the half transfer interrupt.
+ *
+ * \details Initializes DMA mode, then configures it again with the same channel and without
+ *          HalfTransferCallback.
+ *
+ * \par Expected results
+ * - Gpdma_Init() called only 1x, Gpdma_Set_HalfTransferIrqInactive() 1x, no half transfer
+ *   handler registration.
+ */
+void Ut_Adc_Set_DataConfig_DmaSameChannelWithoutHalfCallback_HalfTransferIrqDisabled( void )
+{
+    adc_PeriphConfig_t   periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+    adc_DataConfig_t     dataConfig   = periphConfig.DataConfig;
+    utAdc_DmaChannel_t * channel      = Ut_Adc_Get_DmaChannel( &dataConfig );
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+
+    dataConfig.HalfTransferCallback = NULL;
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_DataConfig( UT_ADC_PERIPH, &dataConfig ) );
+
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_DmaInitCnt );
+    TEST_ASSERT_EQUAL_UINT32( 1u, channel->PrioCnt );
+    TEST_ASSERT_EQUAL_UINT32( 0u, channel->HalfIsrCnt );
+    TEST_ASSERT_EQUAL_UINT32( 0u, channel->HalfOnCnt );
+    TEST_ASSERT_EQUAL_UINT32( 1u, channel->HalfOffCnt );
+}
+
+
+/**
+ * \brief   One shot DMA transfer arms the channel and the transfer complete stops the conversion.
+ *
+ * \details Initializes DMA mode, starts the regular conversion and calls the transfer complete
+ *          handler captured from Gpdma_Init().
+ *
+ * \par Expected results
+ * - Start: block size 8 bytes, destination the data buffer, channel enabled, only the overrun
+ *   interrupt enabled (no EOC), conversion started.
+ * - Transfer complete: complete callback 1x, conversion stopped, channel disabled, overrun
+ *   interrupt disabled.
+ */
+void Ut_Adc_Set_RegStart_DmaOneShot_ChannelArmedAndTransferCompleteStopsConversion( void )
+{
+    adc_PeriphConfig_t   periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+    utAdc_DmaChannel_t * channel      = Ut_Adc_Get_DmaChannel( &periphConfig.DataConfig );
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( UT_ADC_PERIPH ) );
+
+    TEST_ASSERT_EQUAL_UINT32( UT_ADC_DMA_SAMPLES * sizeof( adc_Data_t ), channel->BlockSize );
+    TEST_ASSERT_EQUAL_HEX32( (uint32_t)(uintptr_t)utAdc_Buffer, channel->DstAddr );
+    TEST_ASSERT_EQUAL_UINT32( 1u, channel->ActiveCnt );
+    TEST_ASSERT_EQUAL_HEX32( LL_ADC_IT_OVR, UT_ADC_REG->IER & ( LL_ADC_IT_EOC | LL_ADC_IT_OVR ) );
+    TEST_ASSERT_EQUAL_HEX32( ADC_CR_ADSTART, UT_ADC_REG->CR & ADC_CR_ADSTART );
+
+    const uint32_t inactiveCnt = channel->InactiveCnt;
+
+    utAdc_DmaConfig[ 0u ].TransferCompleteIsr();
+
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL_UINT32( 0u, utAdc_ErrorCnt );
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->CR & ADC_CR_ADSTART );
+    TEST_ASSERT_GREATER_THAN_UINT32( inactiveCnt, channel->InactiveCnt );
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->IER & LL_ADC_IT_OVR );
+}
+
+
+/**
+ * \brief   Circular DMA transfer re-arms the channel at every transfer complete.
+ *
+ * \details Initializes DMA mode with circular buffer, starts the conversion and calls the transfer
+ *          complete handler twice.
+ *
+ * \par Expected results
+ * - Channel enabled 3x (start + 2 re-arms), complete callback 2x, conversion keeps running,
+ *   channel not disabled.
+ */
+void Ut_Adc_Dma_Circular_TransferComplete_ChannelRearmedAndConversionKeepsRunning( void )
+{
+    adc_PeriphConfig_t   periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+    utAdc_DmaChannel_t * channel      = Ut_Adc_Get_DmaChannel( &periphConfig.DataConfig );
+
+    periphConfig.DataConfig.BufferMode = ADC_BUFFER_MODE_CIRCULAR;
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( UT_ADC_PERIPH ) );
+
+    const uint32_t inactiveCnt = channel->InactiveCnt;
+
+    utAdc_DmaConfig[ 0u ].TransferCompleteIsr();
+    utAdc_DmaConfig[ 0u ].TransferCompleteIsr();
+
+    TEST_ASSERT_EQUAL_UINT32( 3u, channel->ActiveCnt );
+    TEST_ASSERT_EQUAL_UINT32( 2u, utAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL_UINT32( 0u, utAdc_ErrorCnt );
+    TEST_ASSERT_EQUAL_HEX32( ADC_CR_ADSTART, UT_ADC_REG->CR & ADC_CR_ADSTART );
+    TEST_ASSERT_EQUAL_UINT32( inactiveCnt, channel->InactiveCnt );
+}
+
+
+/**
+ * \brief   Failed re-arm of the circular DMA transfer is reported as DMA transfer error.
+ *
+ * \details Starts a circular DMA transfer, Gpdma_Set_ChannelActive() fails at the transfer complete.
+ *
+ * \par Expected results
+ * - Error callback 1x with ADC_ERROR_DMA_TRANSFER, no complete callback.
+ */
+void Ut_Adc_Dma_Circular_RearmError_DmaTransferErrorReported( void )
+{
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+
+    periphConfig.DataConfig.BufferMode = ADC_BUFFER_MODE_CIRCULAR;
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( UT_ADC_PERIPH ) );
+
+    utAdc_DmaActiveState = GPDMA_REQUEST_ERROR;
+    utAdc_DmaConfig[ 0u ].TransferCompleteIsr();
+
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_ErrorCnt );
+    TEST_ASSERT_EQUAL( ADC_ERROR_DMA_TRANSFER, utAdc_LastError );
+    TEST_ASSERT_EQUAL_UINT32( 0u, utAdc_CompleteCnt );
+}
+
+
+/**
+ * \brief   GPDMA half transfer handler reports the half filled buffer.
+ *
+ * \details Initializes DMA mode with HalfTransferCallback and calls the captured half transfer handler.
+ *
+ * \par Expected results
+ * - Half transfer callback 1x, no complete and no error callback.
+ */
+void Ut_Adc_Dma_HalfTransfer_CallsHalfCallback( void )
+{
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( UT_ADC_PERIPH ) );
+
+    TEST_ASSERT_NOT_NULL( utAdc_DmaConfig[ 0u ].HalfTransferIsr );
+    utAdc_DmaConfig[ 0u ].HalfTransferIsr();
+
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_HalfCnt );
+    TEST_ASSERT_EQUAL_UINT32( 0u, utAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL_UINT32( 0u, utAdc_ErrorCnt );
+}
+
+
+/**
+ * \brief   DMA transfer start reports GPDMA channel enable error.
+ *
+ * \details Gpdma_Set_ChannelActive() returns error at the conversion start, then it succeeds.
+ *
+ * \par Expected results
+ * - First start: ADC_REQUEST_ERROR, conversion not started.
+ * - Second start: ADC_REQUEST_OK (the failed start did not leave a running transfer).
+ */
+void Ut_Adc_Set_RegStart_DmaChannelActivationError_ReturnsErrorWithoutConversion( void )
+{
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+
+    utAdc_DmaActiveState = GPDMA_REQUEST_ERROR;
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Set_RegStart( UT_ADC_PERIPH ) );
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->CR & ADC_CR_ADSTART );
+
+    utAdc_DmaActiveState = GPDMA_REQUEST_OK;
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( UT_ADC_PERIPH ) );
+    TEST_ASSERT_EQUAL_HEX32( ADC_CR_ADSTART, UT_ADC_REG->CR & ADC_CR_ADSTART );
+}
+
+
+/**
+ * \brief   GPDMA error bits are reported to the user.
+ *
+ * \details Calls the error handler captured from Gpdma_Init() with every reported error bit,
+ *          with two bits at once and with no bit.
+ *
+ * \par Expected results
+ * - Error callback with ADC_ERROR_DMA_TRANSFER / _DMA_CONFIG / _DMA_CONFIG_UPDATE /
+ *   _DMA_TRIGGER_OVERRUN for the respective bit.
+ * - Two bits: two error callbacks (the last one for the higher error identification).
+ * - No bit: no callback.
+ */
+void Ut_Adc_Dma_GpdmaErrors_ReportedToUser( void )
+{
+    const struct
+    {
+        gpdma_ErrorMaskId_t DmaError;
+        adc_ErrorId_t       ErrorId;
+    }   errorLut[] =
+    {
+        { GPDMA_ERROR_TRANSFER,      ADC_ERROR_DMA_TRANSFER        },
+        { GPDMA_ERROR_CONFIG_ERROR,  ADC_ERROR_DMA_CONFIG          },
+        { GPDMA_ERROR_CONFIG_UPDATE, ADC_ERROR_DMA_CONFIG_UPDATE   },
+        { GPDMA_ERROR_TRIG_OVERRUN,  ADC_ERROR_DMA_TRIGGER_OVERRUN },
+    };
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+
+    for( uint32_t errIdx = 0u; ( sizeof( errorLut ) / sizeof( errorLut[ 0u ] ) ) > errIdx; errIdx++ )
+    {
+        utAdc_ErrorCnt  = 0u;
+        utAdc_LastError = ADC_ERROR_CNT;
+
+        utAdc_DmaConfig[ 0u ].ErrorIsr( errorLut[ errIdx ].DmaError );
+
+        TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_ErrorCnt );
+        TEST_ASSERT_EQUAL( errorLut[ errIdx ].ErrorId, utAdc_LastError );
+    }
+
+    utAdc_ErrorCnt  = 0u;
+    utAdc_LastError = ADC_ERROR_CNT;
+
+    utAdc_DmaConfig[ 0u ].ErrorIsr( (gpdma_ErrorMaskId_t)( GPDMA_ERROR_TRANSFER | GPDMA_ERROR_TRIG_OVERRUN ) );
+
+    TEST_ASSERT_EQUAL_UINT32( 2u, utAdc_ErrorCnt );
+    TEST_ASSERT_EQUAL( ADC_ERROR_DMA_TRIGGER_OVERRUN, utAdc_LastError );
+
+    utAdc_DmaConfig[ 0u ].ErrorIsr( (gpdma_ErrorMaskId_t)0u );
+
+    TEST_ASSERT_EQUAL_UINT32( 2u, utAdc_ErrorCnt );
+}
+
+
+/**
+ * \brief   Stopping a running DMA transfer disables the channel and the overrun interrupt.
+ *
+ * \details Starts a DMA transfer and stops it by Adc_Set_RegStop().
+ *
+ * \par Expected results
+ * - Conversion stopped, GPDMA channel disabled, overrun interrupt disabled.
+ */
+void Ut_Adc_Set_RegStop_DmaRunning_ChannelAndOverrunInterruptStopped( void )
+{
+    adc_PeriphConfig_t   periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+    utAdc_DmaChannel_t * channel      = Ut_Adc_Get_DmaChannel( &periphConfig.DataConfig );
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( UT_ADC_PERIPH ) );
+
+    const uint32_t inactiveCnt = channel->InactiveCnt;
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStop( UT_ADC_PERIPH ) );
+
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->CR & ADC_CR_ADSTART );
+    TEST_ASSERT_GREATER_THAN_UINT32( inactiveCnt, channel->InactiveCnt );
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->IER & LL_ADC_IT_OVR );
+}
+
+
+/**
+ * \brief   GPDMA channel disable error is reported by the stop of the transfer.
+ *
+ * \details Starts a DMA transfer, Gpdma_Set_ChannelInactive() fails at Adc_Set_RegStop().
+ *
+ * \par Expected results
+ * - Adc_Set_RegStop() returns ADC_REQUEST_ERROR.
+ */
+void Ut_Adc_Set_RegStop_DmaChannelStopError_ReturnsError( void )
+{
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( UT_ADC_PERIPH ) );
+
+    utAdc_DmaInactiveState = GPDMA_REQUEST_ERROR;
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Set_RegStop( UT_ADC_PERIPH ) );
+}
+
+
+/**
+ * \brief   ADC overrun is reported in DMA mode.
+ *
+ * \details Starts a DMA transfer and calls the captured ADC ISR with the OVR flag.
+ *
+ * \par Expected results
+ * - Error callback 1x with ADC_ERROR_OVERRUN.
+ */
+void Ut_Adc_Isr_DmaMode_OverrunReported( void )
+{
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( UT_ADC_PERIPH ) );
+
+    Ut_Adc_Call_Isr( ADC_ISR_OVR );
+
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_ErrorCnt );
+    TEST_ASSERT_EQUAL( ADC_ERROR_OVERRUN, utAdc_LastError );
+}
+
+
+/**
+ * \brief   Deinitialization releases the GPDMA channel and disables the ADC DMA requests.
+ *
+ * \details Initializes DMA mode and deinitializes the peripheral.
+ *
+ * \par Expected results
+ * - GPDMA channel disabled and its interrupt disabled, ADC DMA requests disabled (DMNGT = 0).
+ */
+void Ut_Adc_Deinit_DmaInitialized_ChannelReleasedAndDmaRequestsDisabled( void )
+{
+    adc_PeriphConfig_t   periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+    utAdc_DmaChannel_t * channel      = Ut_Adc_Get_DmaChannel( &periphConfig.DataConfig );
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+
+    const uint32_t inactiveCnt = channel->InactiveCnt;
+    const uint32_t irqOffCnt   = channel->IrqOffCnt;
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Deinit( UT_ADC_PERIPH ) );
+
+    TEST_ASSERT_GREATER_THAN_UINT32( inactiveCnt, channel->InactiveCnt );
+    TEST_ASSERT_EQUAL_UINT32( irqOffCnt + 1u, channel->IrqOffCnt );
+    TEST_ASSERT_EQUAL_HEX32( LL_ADC_REG_DMA_TRANSFER_NONE, LL_ADC_REG_GetDMATransfer( UT_ADC_REG ) );
+}
+
+
+/**
+ * \brief   GPDMA channel disable error is reported by the deinitialization.
+ *
+ * \details Initializes DMA mode, Gpdma_Set_ChannelInactive() fails at Adc_Deinit().
+ *
+ * \par Expected results
+ * - Adc_Deinit() returns ADC_REQUEST_ERROR.
+ */
+void Ut_Adc_Deinit_DmaChannelStopError_ReturnsError( void )
+{
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+
+    utAdc_DmaInactiveState = GPDMA_REQUEST_ERROR;
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Deinit( UT_ADC_PERIPH ) );
+}
+
 /* ========================== LOCAL FUNCTIONS =============================== */
 
 /**
@@ -1882,6 +2510,10 @@ static void Ut_Adc_Release( void )
 {
     Ut_Adc_Ignore_PeriphMocks();
 
+    /* Release of a DMA data handling disables the GPDMA channel (not ignored in the tests, which count the calls) */
+    Gpdma_Set_ChannelInactive_IgnoreAndReturn( GPDMA_REQUEST_OK );
+    Gpdma_Set_InterruptInactive_IgnoreAndReturn( GPDMA_REQUEST_OK );
+
     (void)Adc_Deinit( UT_ADC_PERIPH );
     (void)Adc_Set_ClockSource( ADC_CLK_SRC_HCLK );
 
@@ -1998,4 +2630,193 @@ static void Ut_Adc_ErrorCallback( adc_ErrorId_t errorId )
 {
     utAdc_LastError = errorId;
     utAdc_ErrorCnt++;
+}
+
+
+/**
+ * \brief Installs the GPDMA stubs of a DMA test and clears the records.
+ */
+static void Ut_Adc_Setup_DmaMocks( void )
+{
+    (void)memset( utAdc_DmaConfig, 0, sizeof( utAdc_DmaConfig ) );
+    (void)memset( utAdc_DmaXferConfig, 0, sizeof( utAdc_DmaXferConfig ) );
+    (void)memset( utAdc_DmaChannel, 0, sizeof( utAdc_DmaChannel ) );
+
+    utAdc_DmaInitCnt       = 0u;
+    utAdc_DmaDefaultState  = GPDMA_REQUEST_OK;
+    utAdc_DmaInitState     = GPDMA_REQUEST_OK;
+    utAdc_DmaActiveState   = GPDMA_REQUEST_OK;
+    utAdc_DmaInactiveState = GPDMA_REQUEST_OK;
+
+    Gpdma_Get_DefaultConfig_StubWithCallback( Ut_Adc_DmaDefaultConfigStub );
+    Gpdma_Init_StubWithCallback( Ut_Adc_DmaInitStub );
+    Gpdma_Set_ChannelActive_StubWithCallback( Ut_Adc_DmaActiveStub );
+    Gpdma_Set_ChannelInactive_StubWithCallback( Ut_Adc_DmaInactiveStub );
+    Gpdma_Set_InterruptActive_StubWithCallback( Ut_Adc_DmaIrqOnStub );
+    Gpdma_Set_InterruptInactive_StubWithCallback( Ut_Adc_DmaIrqOffStub );
+    Gpdma_Set_Priority_StubWithCallback( Ut_Adc_DmaPrioStub );
+    Gpdma_Set_HalfTransferIsrHandler_StubWithCallback( Ut_Adc_DmaHalfIsrStub );
+    Gpdma_Set_HalfTransferIrqActive_StubWithCallback( Ut_Adc_DmaHalfOnStub );
+    Gpdma_Set_HalfTransferIrqInactive_StubWithCallback( Ut_Adc_DmaHalfOffStub );
+    Gpdma_Set_BlockSize_StubWithCallback( Ut_Adc_DmaBlockSizeStub );
+    Gpdma_Set_DestinationAddr_StubWithCallback( Ut_Adc_DmaDstAddrStub );
+}
+
+
+/**
+ * \brief Returns ADC1 configuration in DMA mode (one shot buffer of \ref UT_ADC_DMA_SAMPLES samples).
+ *        Every call selects another GPDMA channel than the previous call (the module keeps its
+ *        channel ownership).
+ */
+static adc_PeriphConfig_t Ut_Adc_Get_DmaPeriphConfig( void )
+{
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_PeriphConfig( ADC_TRANSFER_MODE_DMA, UT_ADC_DMA_SAMPLES );
+
+    periphConfig.DataConfig.DmaChannelId = (adc_DmaChannelId_t)( utAdc_DmaChannelSel % (uint32_t)ADC_DMA_CHANNEL_CNT );
+    periphConfig.DataConfig.DmaPriority  = ADC_DMA_PRIORITY_MEDIUM;
+
+    utAdc_DmaChannelSel++;
+
+    return ( periphConfig );
+}
+
+
+/**
+ * \brief Returns record of the calls of the GPDMA channel of a data configuration.
+ *
+ * \param dataConfig [in]: Data transfer configuration with the DMA identifications
+ */
+static utAdc_DmaChannel_t * Ut_Adc_Get_DmaChannel( const adc_DataConfig_t * const dataConfig )
+{
+    TEST_ASSERT_LESS_THAN_UINT32( GPDMA_PERIPH_CNT, (uint32_t)dataConfig->DmaPeriphId );
+    TEST_ASSERT_LESS_THAN_UINT32( UT_ADC_DMA_CHANNELS, (uint32_t)dataConfig->DmaChannelId );
+
+    return ( &utAdc_DmaChannel[ dataConfig->DmaPeriphId ][ dataConfig->DmaChannelId ] );
+}
+
+
+/** \brief Gpdma_Get_DefaultConfig() stub - returns \ref utAdc_DmaDefaultState */
+static gpdma_RequestState_t Ut_Adc_DmaDefaultConfigStub( gpdma_ConfigStruct_t * const configStruct, int callCnt )
+{
+    (void)callCnt;
+
+    TEST_ASSERT_NOT_NULL( configStruct );
+
+    return ( utAdc_DmaDefaultState );
+}
+
+
+/** \brief Gpdma_Init() stub - stores the configuration */
+static gpdma_RequestState_t Ut_Adc_DmaInitStub( gpdma_ConfigStruct_t * const configStruct, int callCnt )
+{
+    (void)callCnt;
+
+    TEST_ASSERT_NOT_NULL( configStruct );
+    TEST_ASSERT_NOT_NULL( configStruct->TransferConfig );
+
+    if( UT_ADC_DMA_CFG_CNT > utAdc_DmaInitCnt )
+    {
+        utAdc_DmaConfig[ utAdc_DmaInitCnt ]     = *configStruct;
+        utAdc_DmaXferConfig[ utAdc_DmaInitCnt ] = *configStruct->TransferConfig;
+    }
+    else
+    {
+        /* Record buffer full */
+    }
+
+    utAdc_DmaInitCnt++;
+
+    return ( utAdc_DmaInitState );
+}
+
+
+/** \brief Gpdma_Set_ChannelActive() stub - returns \ref utAdc_DmaActiveState */
+static gpdma_RequestState_t Ut_Adc_DmaActiveStub( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, int callCnt )
+{
+    (void)callCnt;
+    utAdc_DmaChannel[ dmaBus ][ dmaChannel ].ActiveCnt++;
+    return ( utAdc_DmaActiveState );
+}
+
+
+/** \brief Gpdma_Set_ChannelInactive() stub - returns \ref utAdc_DmaInactiveState */
+static gpdma_RequestState_t Ut_Adc_DmaInactiveStub( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, int callCnt )
+{
+    (void)callCnt;
+    utAdc_DmaChannel[ dmaBus ][ dmaChannel ].InactiveCnt++;
+    return ( utAdc_DmaInactiveState );
+}
+
+
+/** \brief Gpdma_Set_InterruptActive() stub */
+static gpdma_RequestState_t Ut_Adc_DmaIrqOnStub( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, int callCnt )
+{
+    (void)callCnt;
+    utAdc_DmaChannel[ dmaBus ][ dmaChannel ].IrqOnCnt++;
+    return ( GPDMA_REQUEST_OK );
+}
+
+
+/** \brief Gpdma_Set_InterruptInactive() stub */
+static gpdma_RequestState_t Ut_Adc_DmaIrqOffStub( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, int callCnt )
+{
+    (void)callCnt;
+    utAdc_DmaChannel[ dmaBus ][ dmaChannel ].IrqOffCnt++;
+    return ( GPDMA_REQUEST_OK );
+}
+
+
+/** \brief Gpdma_Set_Priority() stub */
+static gpdma_RequestState_t Ut_Adc_DmaPrioStub( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, gpdma_Priority_t channelPrio, int callCnt )
+{
+    (void)callCnt;
+    utAdc_DmaChannel[ dmaBus ][ dmaChannel ].PrioCnt++;
+    utAdc_DmaChannel[ dmaBus ][ dmaChannel ].Prio = channelPrio;
+    return ( GPDMA_REQUEST_OK );
+}
+
+
+/** \brief Gpdma_Set_HalfTransferIsrHandler() stub */
+static gpdma_RequestState_t Ut_Adc_DmaHalfIsrStub( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, gpdma_IsrCallback * const irqHandler, int callCnt )
+{
+    (void)callCnt;
+    (void)irqHandler;
+    utAdc_DmaChannel[ dmaBus ][ dmaChannel ].HalfIsrCnt++;
+    return ( GPDMA_REQUEST_OK );
+}
+
+
+/** \brief Gpdma_Set_HalfTransferIrqActive() stub */
+static gpdma_RequestState_t Ut_Adc_DmaHalfOnStub( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, int callCnt )
+{
+    (void)callCnt;
+    utAdc_DmaChannel[ dmaBus ][ dmaChannel ].HalfOnCnt++;
+    return ( GPDMA_REQUEST_OK );
+}
+
+
+/** \brief Gpdma_Set_HalfTransferIrqInactive() stub */
+static gpdma_RequestState_t Ut_Adc_DmaHalfOffStub( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, int callCnt )
+{
+    (void)callCnt;
+    utAdc_DmaChannel[ dmaBus ][ dmaChannel ].HalfOffCnt++;
+    return ( GPDMA_REQUEST_OK );
+}
+
+
+/** \brief Gpdma_Set_BlockSize() stub */
+static gpdma_RequestState_t Ut_Adc_DmaBlockSizeStub( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, gpdma_BlockSize_t blockSize, int callCnt )
+{
+    (void)callCnt;
+    utAdc_DmaChannel[ dmaBus ][ dmaChannel ].BlockSize = blockSize;
+    return ( GPDMA_REQUEST_OK );
+}
+
+
+/** \brief Gpdma_Set_DestinationAddr() stub */
+static gpdma_RequestState_t Ut_Adc_DmaDstAddrStub( gpdma_PeriphId_t dmaBus, gpdma_ChannelId_t dmaChannel, gpdma_DstAddr_t destAddr, int callCnt )
+{
+    (void)callCnt;
+    utAdc_DmaChannel[ dmaBus ][ dmaChannel ].DstAddr = destAddr;
+    return ( GPDMA_REQUEST_OK );
 }

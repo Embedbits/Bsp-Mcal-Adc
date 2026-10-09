@@ -164,6 +164,17 @@ static uint32_t           Adc_Get_AwdThresholdRaw     ( adc_AwdId_t awdId, uint3
 
 /* =========================== LOCAL VARIABLES ============================== */
 
+#if defined(STM32H543xx) || \
+    defined(STM32H553xx)
+/** ADC3 channels 2 / 3 are on PB15 / PB12 on STM32H543 / STM32H553 (STM32CubeMX database) */
+#define ADC_PIN_ADC3_IN2                     { .PortId = GPIO_PORT_B  , .PinId = GPIO_PIN_ID_15  }
+#define ADC_PIN_ADC3_IN3                     { .PortId = GPIO_PORT_B  , .PinId = GPIO_PIN_ID_12  }
+#else
+/** ADC3 channels 2 / 3 are on PE8 / PE9 on the other lines with ADC3 (STM32CubeMX database) */
+#define ADC_PIN_ADC3_IN2                     { .PortId = GPIO_PORT_E  , .PinId = GPIO_PIN_ID_8   }
+#define ADC_PIN_ADC3_IN3                     { .PortId = GPIO_PORT_E  , .PinId = GPIO_PIN_ID_9   }
+#endif /* STM32H543xx / STM32H553xx */
+
 static const adc_GpioPeriphConfig_t adc_GpioPeriphConfig[ ADC_PERIPH_CNT ] =
 {
 #if defined (STM32H503xx)
@@ -303,9 +314,9 @@ static const adc_GpioPeriphConfig_t adc_GpioPeriphConfig[ ADC_PERIPH_CNT ] =
                                                                 .ChannelInN = { .PortId = GPIO_PORT_CNT, .PinId = GPIO_PIN_ID_CNT }  },
    .Channel[ ADC_CHANNEL_1 ]  = { .ChannelId  = ADC_CHANNEL_1 , .ChannelInP = { .PortId = GPIO_PORT_E  , .PinId = GPIO_PIN_ID_7   },
                                                                 .ChannelInN = { .PortId = GPIO_PORT_CNT, .PinId = GPIO_PIN_ID_CNT }  },
-   .Channel[ ADC_CHANNEL_2 ]  = { .ChannelId  = ADC_CHANNEL_2 , .ChannelInP = { .PortId = GPIO_PORT_E  , .PinId = GPIO_PIN_ID_8   },
+   .Channel[ ADC_CHANNEL_2 ]  = { .ChannelId  = ADC_CHANNEL_2 , .ChannelInP = ADC_PIN_ADC3_IN2,
                                                                 .ChannelInN = { .PortId = GPIO_PORT_CNT, .PinId = GPIO_PIN_ID_CNT }  },
-   .Channel[ ADC_CHANNEL_3 ]  = { .ChannelId  = ADC_CHANNEL_3 , .ChannelInP = { .PortId = GPIO_PORT_E  , .PinId = GPIO_PIN_ID_9   },
+   .Channel[ ADC_CHANNEL_3 ]  = { .ChannelId  = ADC_CHANNEL_3 , .ChannelInP = ADC_PIN_ADC3_IN3,
                                                                 .ChannelInN = { .PortId = GPIO_PORT_CNT, .PinId = GPIO_PIN_ID_CNT }  },
    .Channel[ ADC_CHANNEL_4 ]  = { .ChannelId  = ADC_CHANNEL_4 , .ChannelInP = { .PortId = GPIO_PORT_E  , .PinId = GPIO_PIN_ID_10  },
                                                                 .ChannelInN = { .PortId = GPIO_PORT_CNT, .PinId = GPIO_PIN_ID_CNT }  },
