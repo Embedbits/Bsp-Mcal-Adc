@@ -62,6 +62,30 @@ static void                 Ut_Adc_ErrorCallback        ( adc_ErrorId_t errorId 
 #define UT_ADC_RCC                          ( RCC_PERIPH_ADC1 )
 #define UT_ADC_NVIC                         ( NVIC_PERIPH_IRQ_ADC )
 
+/** DMA stream of the test peripheral (ADC1 request on DMA2 stream 0, channel selection 0) */
+#define UT_ADC_DMA                          ( ADC_DMA_ADC1_DMA2_STREAM0 )
+
+/** Encoded DMA stream from the peripheral index, DMA peripheral index, stream number and channel selection
+ *  number (bit-fields written independently of ADC_DMA_ENCODE) */
+#define UT_ADC_DMA_CODE( PERIPH, DMA, STREAM, CHSEL )   ( ( (PERIPH) << 15u ) | ( (DMA) << 10u ) | ( (STREAM) << 5u ) | (CHSEL) )
+
+/** External regular triggers of the trigger tests (TIM2 / TIM3 TRGO, TIM1 channels on MCUs without these timers - STM32F410) */
+#if defined(TIM2)
+    #define UT_ADC_TRIGGER_A                ( ADC_REG_TRIGGER_EXT_TIM2_TRGO )
+    #define UT_ADC_TRIGGER_A_LL             ( LL_ADC_REG_TRIG_EXT_TIM2_TRGO )
+#else
+    #define UT_ADC_TRIGGER_A                ( ADC_REG_TRIGGER_EXT_TIM1_CH3 )
+    #define UT_ADC_TRIGGER_A_LL             ( LL_ADC_REG_TRIG_EXT_TIM1_CH3 )
+#endif /* TIM2 */
+
+#if defined(TIM3)
+    #define UT_ADC_TRIGGER_B                ( ADC_REG_TRIGGER_EXT_TIM3_TRGO )
+    #define UT_ADC_TRIGGER_B_LL             ( LL_ADC_REG_TRIG_EXT_TIM3_TRGO )
+#else
+    #define UT_ADC_TRIGGER_B                ( ADC_REG_TRIGGER_EXT_TIM1_CH2 )
+    #define UT_ADC_TRIGGER_B_LL             ( LL_ADC_REG_TRIG_EXT_TIM1_CH2 )
+#endif /* TIM3 */
+
 /** Clock frequencies returned by RCC mock [Hz] */
 #define UT_ADC_PCLK2_HZ                     ( 84000000u )
 #define UT_ADC_HCLK_HZ                      ( 168000000u )
@@ -78,6 +102,20 @@ static void                 Ut_Adc_ErrorCallback        ( adc_ErrorId_t errorId 
 
 /** Size of the test data buffer */
 #define UT_ADC_BUF_SIZE                     ( 8u )
+
+#if defined(STM32F410Cx) || \
+    defined(STM32F410Tx) || \
+    defined(STM32F412Cx)
+/** Third pin channel of the sequence test: the small packages have no port C pins (PA3) */
+#define UT_ADC_THIRD_CHANNEL                ( ADC_CHANNEL_3 )
+#define UT_ADC_THIRD_PORT                   ( GPIO_PORT_A )
+#define UT_ADC_THIRD_PIN_ID                 ( GPIO_PIN_ID_3 )
+#else
+/** Third pin channel of the sequence test: channel 15 (PC5, SMPR1 region of the sampling time) */
+#define UT_ADC_THIRD_CHANNEL                ( ADC_CHANNEL_15 )
+#define UT_ADC_THIRD_PORT                   ( GPIO_PORT_C )
+#define UT_ADC_THIRD_PIN_ID                 ( GPIO_PIN_ID_5 )
+#endif /* STM32F410Cx / STM32F410Tx / STM32F412Cx */
 
 /** Value of SR after flag clear in emulated register (all other bits written with 1) */
 #define UT_ADC_SR_CLEARED( flags )          ( ~(uint32_t)( flags ) )
@@ -478,44 +516,45 @@ void Ut_Adc_PeriphInit_InvalidChannels_ReturnsErrorWithoutAccess( void )
 /**
  * \brief   Adc_PeriphInit() configures GPIO pins of external channels and the regular sequence.
  *
- * \details Regular sequence channel 0 (PA0), channel 8 (PB0), channel 15 (PC5).
+ * \details Regular sequence channel 0 (PA0), channel 5 (PA5), channel 15 (PC5; channel 3 / PA3 on
+ *          the small packages without port C pins). All the pins exist on the device line.
  *
  * \par Expected results
- * - 3 GPIO initializations, the last one PC5 analog without pull.
- * - SQR3: rank 1 = 0, rank 2 = 8, rank 3 = 15, SQR1 L = 2 (3 conversions).
- * - Sampling time of channel 8 (SMPR2) = 3 cycles.
+ * - 3 GPIO initializations, the last one PC5 (PA3) analog without pull.
+ * - SQR3: rank 1 = 0, rank 2 = 5, rank 3 = 15 (3), SQR1 L = 2 (3 conversions).
+ * - Sampling time of channel 5 (SMPR2) = 3 cycles.
  */
 void Ut_Adc_PeriphInit_PinChannels_GpioAnalogAndSequence( void )
 {
     adc_PeriphConfig_t config = Ut_Adc_Get_PeriphConfig( ADC_TRANSFER_MODE_POLL, 0u );
 
     config.RegChannelsCnt = 3u;
-    config.RegChannels[ 0u ] = (adc_ChannelConfig_t){ ADC_CHANNEL_0,  ADC_CHANNEL_INPUT_PIN_SINGLE, ADC_CHANNEL_SAMPLING_15_CYCLES };
-    config.RegChannels[ 1u ] = (adc_ChannelConfig_t){ ADC_CHANNEL_8,  ADC_CHANNEL_INPUT_PIN_SINGLE, ADC_CHANNEL_SAMPLING_3_CYCLES  };
-    config.RegChannels[ 2u ] = (adc_ChannelConfig_t){ ADC_CHANNEL_15, ADC_CHANNEL_INPUT_PIN_SINGLE, ADC_CHANNEL_SAMPLING_56_CYCLES };
+    config.RegChannels[ 0u ] = (adc_ChannelConfig_t){ ADC_CHANNEL_0,          ADC_CHANNEL_INPUT_PIN_SINGLE, ADC_CHANNEL_SAMPLING_15_CYCLES };
+    config.RegChannels[ 1u ] = (adc_ChannelConfig_t){ ADC_CHANNEL_5,          ADC_CHANNEL_INPUT_PIN_SINGLE, ADC_CHANNEL_SAMPLING_3_CYCLES  };
+    config.RegChannels[ 2u ] = (adc_ChannelConfig_t){ UT_ADC_THIRD_CHANNEL,   ADC_CHANNEL_INPUT_PIN_SINGLE, ADC_CHANNEL_SAMPLING_56_CYCLES };
 
-    UT_ADC_REG->SMPR2 = ADC_SMPR2_SMP8;
+    UT_ADC_REG->SMPR2 = ADC_SMPR2_SMP5;
     Ut_Adc_PeriphInit( &config );
 
     TEST_ASSERT_EQUAL_UINT32( 3u, utAdc_GpioInitCnt );
-    TEST_ASSERT_EQUAL( GPIO_PORT_C, utAdc_GpioConfig.PortId );
-    TEST_ASSERT_EQUAL( GPIO_PIN_ID_5, utAdc_GpioConfig.PinId );
+    TEST_ASSERT_EQUAL( UT_ADC_THIRD_PORT, utAdc_GpioConfig.PortId );
+    TEST_ASSERT_EQUAL( UT_ADC_THIRD_PIN_ID, utAdc_GpioConfig.PinId );
     TEST_ASSERT_EQUAL( GPIO_PIN_MODE_ANALOG, utAdc_GpioConfig.PinMode );
     TEST_ASSERT_EQUAL( GPIO_PIN_PULL_NONE, utAdc_GpioConfig.PinPull );
 
-    TEST_ASSERT_EQUAL_HEX32( ( 0u << ADC_SQR3_SQ1_Pos ) | ( 8u << ADC_SQR3_SQ2_Pos ) | ( 15u << ADC_SQR3_SQ3_Pos ), UT_ADC_REG->SQR3 );
+    TEST_ASSERT_EQUAL_HEX32( ( 0u << ADC_SQR3_SQ1_Pos ) | ( 5u << ADC_SQR3_SQ2_Pos ) | ( (uint32_t)UT_ADC_THIRD_CHANNEL << ADC_SQR3_SQ3_Pos ), UT_ADC_REG->SQR3 );
     TEST_ASSERT_EQUAL_HEX32( 2u << ADC_SQR1_L_Pos, UT_ADC_REG->SQR1 & ADC_SQR1_L );
-    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->SMPR2 & ADC_SMPR2_SMP8 );
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->SMPR2 & ADC_SMPR2_SMP5 );
 }
 
 
 /**
  * \brief   Adc_PeriphInit() with external trigger and continuous mode keeps them for the start.
  *
- * \details Regular trigger TIM2 TRGO, falling edge, continuous mode.
+ * \details Regular trigger TIM2 TRGO (TIM1 CC3 on MCUs without TIM2), falling edge, continuous mode.
  *
  * \par Expected results
- * - EXTSEL = TIM2 TRGO, EXTEN = 0 and CONT = 0 (conversion not started).
+ * - EXTSEL = selected trigger, EXTEN = 0 and CONT = 0 (conversion not started).
  * - Trigger source, edge and mode read back the configuration.
  */
 void Ut_Adc_PeriphInit_ExternalTriggerContinuous_KeptUntilStart( void )
@@ -525,16 +564,16 @@ void Ut_Adc_PeriphInit_ExternalTriggerContinuous_KeptUntilStart( void )
     adc_TriggerEdge_t    triggerEdge = ADC_TRIGGER_EDGE_CNT;
     adc_RegTriggerMode_t triggerMode = ADC_REG_TRIGGER_MODE_CNT;
 
-    config.RegTriggerId   = ADC_REG_TRIGGER_EXT_TIM2_TRGO;
+    config.RegTriggerId   = UT_ADC_TRIGGER_A;
     config.RegTriggerEdge = ADC_TRIGGER_EDGE_FALLING;
     config.RegTriggerMode = ADC_REG_TRIGGER_MODE_CONTINUOUS;
     Ut_Adc_PeriphInit( &config );
 
-    TEST_ASSERT_EQUAL_HEX32( LL_ADC_REG_TRIG_EXT_TIM2_TRGO & ADC_CR2_EXTSEL, UT_ADC_REG->CR2 & ADC_CR2_EXTSEL );
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_TRIGGER_A_LL & ADC_CR2_EXTSEL, UT_ADC_REG->CR2 & ADC_CR2_EXTSEL );
     TEST_ASSERT_BITS_LOW( ADC_CR2_EXTEN | ADC_CR2_CONT, UT_ADC_REG->CR2 );
 
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_TriggerSrc( UT_ADC_PERIPH, &triggerSrc ) );
-    TEST_ASSERT_EQUAL( ADC_REG_TRIGGER_EXT_TIM2_TRGO, triggerSrc );
+    TEST_ASSERT_EQUAL( UT_ADC_TRIGGER_A, triggerSrc );
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_TriggerEdge( UT_ADC_PERIPH, &triggerEdge ) );
     TEST_ASSERT_EQUAL( ADC_TRIGGER_EDGE_FALLING, triggerEdge );
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_TriggerMode( UT_ADC_PERIPH, &triggerMode ) );
@@ -761,7 +800,7 @@ void Ut_Adc_Set_RegStart_Continuous_RunningUntilStop( void )
 /**
  * \brief   External trigger is enabled by start and disabled by stop.
  *
- * \details Trigger TIM3 TRGO, both edges, single mode.
+ * \details Trigger TIM3 TRGO (TIM1 CC2 on MCUs without TIM3), both edges, single mode.
  *
  * \par Expected results
  * - Start: EXTEN = both edges, SWSTART not set, CONT = 0.
@@ -771,7 +810,7 @@ void Ut_Adc_Set_RegStart_ExternalTrigger_ExtenControlled( void )
 {
     adc_PeriphConfig_t config = Ut_Adc_Get_PeriphConfig( ADC_TRANSFER_MODE_POLL, 0u );
 
-    config.RegTriggerId   = ADC_REG_TRIGGER_EXT_TIM3_TRGO;
+    config.RegTriggerId   = UT_ADC_TRIGGER_B;
     config.RegTriggerEdge = ADC_TRIGGER_EDGE_BOTH;
     Ut_Adc_PeriphInit( &config );
 
@@ -781,7 +820,7 @@ void Ut_Adc_Set_RegStart_ExternalTrigger_ExtenControlled( void )
 
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStop( UT_ADC_PERIPH ) );
     TEST_ASSERT_BITS_LOW( ADC_CR2_EXTEN, UT_ADC_REG->CR2 );
-    TEST_ASSERT_EQUAL_HEX32( LL_ADC_REG_TRIG_EXT_TIM3_TRGO & ADC_CR2_EXTSEL, UT_ADC_REG->CR2 & ADC_CR2_EXTSEL );
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_TRIGGER_B_LL & ADC_CR2_EXTSEL, UT_ADC_REG->CR2 & ADC_CR2_EXTSEL );
 }
 
 
@@ -1069,8 +1108,8 @@ void Ut_Adc_Dma_Init_StreamConfigured( void )
 {
     adc_PeriphConfig_t config = Ut_Adc_Get_PeriphConfig( ADC_TRANSFER_MODE_DMA, UT_ADC_BUF_SIZE );
 
-    config.DataConfig.BufferMode   = ADC_BUFFER_MODE_CIRCULAR;
-    config.DataConfig.DmaChannelId = ADC_DMA_CHANNEL_4;
+    config.DataConfig.BufferMode = ADC_BUFFER_MODE_CIRCULAR;
+    config.DataConfig.Dma        = ADC_DMA_ADC1_DMA2_STREAM4;
     Ut_Adc_PeriphInit( &config );
 
     TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_DmaInitCnt );
@@ -1089,10 +1128,11 @@ void Ut_Adc_Dma_Init_StreamConfigured( void )
 
 
 /**
- * \brief   DMA mode rejects stream not connected to the ADC request.
+ * \brief   DMA mode rejects stream out of the DMA stream list of the ADC.
  *
  * \par Expected results
- * - DMA1 stream 0 and DMA2 stream 7 for ADC1: ADC_REQUEST_ERROR, Dma_Init() not called.
+ * - Unused stream, DMA1 stream 0, DMA2 stream 7 and the stream list item of ADC2 (DMA2 stream 2)
+ *   for ADC1: ADC_REQUEST_ERROR, Dma_Init() not called.
  */
 void Ut_Adc_Dma_Init_InvalidStream_ReturnsError( void )
 {
@@ -1101,12 +1141,19 @@ void Ut_Adc_Dma_Init_InvalidStream_ReturnsError( void )
     Rcc_Get_PeriphClk_StubWithCallback( Ut_Adc_RccGetClkStub );
     Ut_Adc_Set_ClockDiv4();
 
-    config.DataConfig.DmaPeriphId = ADC_DMA_PERIPH_1;
+    config.DataConfig.Dma = ADC_DMA_UNUSED;
     TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_PeriphInit( &config ) );
 
-    config.DataConfig.DmaPeriphId  = ADC_DMA_PERIPH_2;
-    config.DataConfig.DmaChannelId = ADC_DMA_CHANNEL_7;
+    config.DataConfig.Dma = (adc_Dma_t)ADC_DMA_ENCODE( ADC_PERIPH_1, ADC_DMA_PERIPH_1, ADC_DMA_CHANNEL_0, 0u );
     TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_PeriphInit( &config ) );
+
+    config.DataConfig.Dma = (adc_Dma_t)ADC_DMA_ENCODE( ADC_PERIPH_1, ADC_DMA_PERIPH_2, ADC_DMA_CHANNEL_7, 0u );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_PeriphInit( &config ) );
+
+#if defined(ADC2)
+    config.DataConfig.Dma = ADC_DMA_ADC2_DMA2_STREAM2;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_PeriphInit( &config ) );
+#endif /* ADC2 */
 
     TEST_ASSERT_EQUAL_UINT32( 0u, utAdc_DmaInitCnt );
 }
@@ -1502,18 +1549,18 @@ void Ut_Adc_Dma_Adc2Adc3Callbacks_EventsReported( void )
     const struct
     {
         adc_PeriphId_t       PeriphId;
-        adc_DmaChannelId_t   Stream;
+        adc_Dma_t            Dma;
     }   periphLut[] =
     {
-        { ADC_PERIPH_2, ADC_DMA_CHANNEL_2 },
-        { ADC_PERIPH_3, ADC_DMA_CHANNEL_1 },
+        { ADC_PERIPH_2, ADC_DMA_ADC2_DMA2_STREAM2 },
+        { ADC_PERIPH_3, ADC_DMA_ADC3_DMA2_STREAM1 },
     };
 
     for( uint32_t idx = 0u; 2u > idx; idx++ )
     {
-        config.PeriphId                = periphLut[ idx ].PeriphId;
-        config.RegChannels[ 0u ]       = (adc_ChannelConfig_t){ ADC_CHANNEL_0, ADC_CHANNEL_INPUT_PIN_SINGLE, ADC_CHANNEL_SAMPLING_15_CYCLES };
-        config.DataConfig.DmaChannelId = periphLut[ idx ].Stream;
+        config.PeriphId          = periphLut[ idx ].PeriphId;
+        config.RegChannels[ 0u ] = (adc_ChannelConfig_t){ ADC_CHANNEL_0, ADC_CHANNEL_INPUT_PIN_SINGLE, ADC_CHANNEL_SAMPLING_15_CYCLES };
+        config.DataConfig.Dma    = periphLut[ idx ].Dma;
 
         Ut_Adc_PeriphInit( &config );
 
@@ -1528,6 +1575,112 @@ void Ut_Adc_Dma_Adc2Adc3Callbacks_EventsReported( void )
 #else
     TEST_IGNORE_MESSAGE( "MCU without ADC2 / ADC3" );
 #endif /* ADC2 AND ADC3 */
+}
+
+
+/**
+ * \brief   Every item of the DMA stream list configures its DMA stream.
+ *
+ * \details Every item of \ref adc_Dma_t (STM32CubeMX database / reference manual request mapping:
+ *          ADC1 DMA2 stream 0 / 4 channel 0, ADC2 DMA2 stream 2 / 3 channel 1, ADC3 DMA2 stream
+ *          0 / 1 channel 2) of every ADC of the MCU in DMA mode.
+ *
+ * \par Expected results
+ * - ADC_REQUEST_OK, Dma_Init() of DMA2 with the stream and the channel selection of the request
+ *   map; the channel selection stored in the item equals the request map.
+ */
+void Ut_Adc_Dma_AllStreams_StreamAndChannelSelectionConfigured( void )
+{
+    const struct
+    {
+        adc_PeriphId_t       PeriphId;
+        adc_Dma_t            Dma;
+        adc_DmaPeriphId_t    DmaId;
+        adc_DmaChannelId_t   Stream;
+        dma_PeriphReqId_t    Request;
+    }   dmaLut[] =
+    {
+        { ADC_PERIPH_1, ADC_DMA_ADC1_DMA2_STREAM0, ADC_DMA_PERIPH_2, ADC_DMA_CHANNEL_0, DMA_REQ_CHANNEL_0 },
+        { ADC_PERIPH_1, ADC_DMA_ADC1_DMA2_STREAM4, ADC_DMA_PERIPH_2, ADC_DMA_CHANNEL_4, DMA_REQ_CHANNEL_0 },
+#if defined(ADC2)
+        { ADC_PERIPH_2, ADC_DMA_ADC2_DMA2_STREAM2, ADC_DMA_PERIPH_2, ADC_DMA_CHANNEL_2, DMA_REQ_CHANNEL_1 },
+        { ADC_PERIPH_2, ADC_DMA_ADC2_DMA2_STREAM3, ADC_DMA_PERIPH_2, ADC_DMA_CHANNEL_3, DMA_REQ_CHANNEL_1 },
+#endif /* ADC2 */
+#if defined(ADC3)
+        { ADC_PERIPH_3, ADC_DMA_ADC3_DMA2_STREAM0, ADC_DMA_PERIPH_2, ADC_DMA_CHANNEL_0, DMA_REQ_CHANNEL_2 },
+        { ADC_PERIPH_3, ADC_DMA_ADC3_DMA2_STREAM1, ADC_DMA_PERIPH_2, ADC_DMA_CHANNEL_1, DMA_REQ_CHANNEL_2 },
+#endif /* ADC3 */
+    };
+
+    for( uint32_t idx = 0u; ( sizeof( dmaLut ) / sizeof( dmaLut[ 0u ] ) ) > idx; idx++ )
+    {
+        adc_PeriphConfig_t config = Ut_Adc_Get_PeriphConfig( ADC_TRANSFER_MODE_DMA, UT_ADC_BUF_SIZE );
+
+        Ut_Adc_Release();
+        utAdc_DmaInitCnt = 0u;
+
+        config.PeriphId       = dmaLut[ idx ].PeriphId;
+        config.DataConfig.Dma = dmaLut[ idx ].Dma;
+
+        if( ADC_PERIPH_1 != dmaLut[ idx ].PeriphId )
+        {
+            config.RegChannels[ 0u ] = (adc_ChannelConfig_t){ ADC_CHANNEL_0, ADC_CHANNEL_INPUT_PIN_SINGLE, ADC_CHANNEL_SAMPLING_15_CYCLES };
+        }
+        else
+        {
+            /* Internal VREF channel of ADC1 */
+        }
+
+        Ut_Adc_PeriphInit( &config );
+
+        TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_DmaInitCnt );
+        TEST_ASSERT_EQUAL( (dma_PeriphId_t)dmaLut[ idx ].DmaId,  utAdc_DmaConfig.DmaPeriphId );
+        TEST_ASSERT_EQUAL( (dma_ChannelId_t)dmaLut[ idx ].Stream, utAdc_DmaConfig.DmaChannel );
+        TEST_ASSERT_EQUAL( dmaLut[ idx ].Request,                 utAdc_DmaConfig.PeripheralReqId );
+
+        /* Channel selection of the list item equals the one used by the request map */
+        TEST_ASSERT_EQUAL_UINT32( (uint32_t)dmaLut[ idx ].Request >> DMA_SxCR_CHSEL_Pos, ADC_DMA_BIT_MASK_DECODE_CHSEL( dmaLut[ idx ].Dma ) );
+    }
+}
+
+
+/**
+ * \brief   Items of the DMA stream list carry ADC peripheral, DMA peripheral, stream and channel
+ *          selection of the stream.
+ *
+ * \details Expected values are written as (ADC peripheral, DMA peripheral index, stream number,
+ *          channel selection number) taken from the DMA2 request mapping of the STM32F4 reference
+ *          manuals, independently of the encoding macro.
+ *
+ * \par Expected results
+ * - Every item of the ADC peripherals of the MCU carries the expected bit-fields.
+ * - The unused item equals ADC_DMA_CODE_UNUSED, the decoding macros return the fields.
+ */
+void Ut_Adc_DmaList_Items_EncodePeriphDmaStreamAndChannelSelection( void )
+{
+    /* DMA2 (index 1) */
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_DMA_CODE( ADC_PERIPH_1, 1u, 0u, 0u ), ADC_DMA_ADC1_DMA2_STREAM0 );
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_DMA_CODE( ADC_PERIPH_1, 1u, 4u, 0u ), ADC_DMA_ADC1_DMA2_STREAM4 );
+#if defined(ADC2)
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_DMA_CODE( ADC_PERIPH_2, 1u, 2u, 1u ), ADC_DMA_ADC2_DMA2_STREAM2 );
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_DMA_CODE( ADC_PERIPH_2, 1u, 3u, 1u ), ADC_DMA_ADC2_DMA2_STREAM3 );
+#endif /* ADC2 */
+#if defined(ADC3)
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_DMA_CODE( ADC_PERIPH_3, 1u, 0u, 2u ), ADC_DMA_ADC3_DMA2_STREAM0 );
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_DMA_CODE( ADC_PERIPH_3, 1u, 1u, 2u ), ADC_DMA_ADC3_DMA2_STREAM1 );
+#endif /* ADC3 */
+
+    /* Decoding of the fields */
+    TEST_ASSERT_EQUAL_UINT32( ADC_PERIPH_1,       ADC_DMA_BIT_MASK_DECODE_PERIPH( ADC_DMA_ADC1_DMA2_STREAM4 ) );
+    TEST_ASSERT_EQUAL_UINT32( ADC_DMA_PERIPH_2,   ADC_DMA_BIT_MASK_DECODE_DMA( ADC_DMA_ADC1_DMA2_STREAM4 ) );
+    TEST_ASSERT_EQUAL_UINT32( ADC_DMA_CHANNEL_4,  ADC_DMA_BIT_MASK_DECODE_STREAM( ADC_DMA_ADC1_DMA2_STREAM4 ) );
+    TEST_ASSERT_EQUAL_UINT32( 0u,                 ADC_DMA_BIT_MASK_DECODE_CHSEL( ADC_DMA_ADC1_DMA2_STREAM4 ) );
+
+    /* Unused stream */
+    TEST_ASSERT_EQUAL_HEX32( ADC_DMA_CODE_UNUSED, ADC_DMA_UNUSED );
+    TEST_ASSERT_EQUAL_UINT32( ADC_PERIPH_CNT,      ADC_DMA_BIT_MASK_DECODE_PERIPH( ADC_DMA_UNUSED ) );
+    TEST_ASSERT_EQUAL_UINT32( ADC_DMA_PERIPH_CNT,  ADC_DMA_BIT_MASK_DECODE_DMA( ADC_DMA_UNUSED ) );
+    TEST_ASSERT_EQUAL_UINT32( ADC_DMA_CHANNEL_CNT, ADC_DMA_BIT_MASK_DECODE_STREAM( ADC_DMA_UNUSED ) );
 }
 
 /* ========================== LOCAL FUNCTIONS =============================== */
@@ -1720,8 +1873,7 @@ static adc_PeriphConfig_t Ut_Adc_Get_PeriphConfig( adc_TransferMode_t xferMode, 
     periphConfig.DataConfig.DataBuffer               = ( 0u < bufferSize ) ? utAdc_Buffer : NULL;
     periphConfig.DataConfig.BufferSize               = bufferSize;
     periphConfig.DataConfig.BufferMode               = ADC_BUFFER_MODE_ONE_SHOT;
-    periphConfig.DataConfig.DmaPeriphId              = ADC_DMA_PERIPH_2;
-    periphConfig.DataConfig.DmaChannelId             = ADC_DMA_CHANNEL_0;
+    periphConfig.DataConfig.Dma                      = UT_ADC_DMA;
     periphConfig.DataConfig.DmaPriority              = ADC_DMA_PRIORITY_LOW;
     periphConfig.DataConfig.IrqPriority              = UT_ADC_PRIO;
     periphConfig.DataConfig.HalfTransferCallback     = Ut_Adc_HalfCallback;

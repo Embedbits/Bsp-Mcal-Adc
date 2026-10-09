@@ -185,7 +185,37 @@ static adc_RequestState_t Adc_Set_XferStop            ( adc_PeriphId_t periphId 
 
 /* =========================== LOCAL VARIABLES ============================== */
 
-/** GPIO pins of the ADC channels (ADC123_INx / ADC12_INx / ADC3_INx, refer to device datasheet) */
+/** GPIO pins of the ADC channels (ADC123_INx / ADC12_INx / ADC3_INx). Generated from the STM32CubeMX database per device
+ *  line (signals ADCx_INy, union of the packages of the devices of the line, ADC instances of the CMSIS device header,
+ *  Test_L4_tools gen/cubemx_pins/adc_pins_lines.py) - a channel has a pin only on the device lines that have it
+ *  (ADC_PIN_NONE == no pin). */
+#if defined(STM32F410Cx) || \
+    defined(STM32F412Cx)
+/* F410Cx F412Cx */
+static const adc_GpioPeriphConfig_t adc_GpioPeriphConfig[ ADC_PERIPH_CNT ] =
+{
+ { .PeriphId = ADC_PERIPH_1,
+   .Channel  = { ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_0 ), ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_1 ),
+                 ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_2 ), ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_3 ),
+                 ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_4 ), ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_5 ),
+                 ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_6 ), ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_7 ),
+                 ADC_PIN( GPIO_PORT_B, GPIO_PIN_ID_0 ), ADC_PIN( GPIO_PORT_B, GPIO_PIN_ID_1 ),
+                 ADC_PIN_NONE,                          ADC_PIN_NONE,
+                 ADC_PIN_NONE,                          ADC_PIN_NONE,
+                 ADC_PIN_NONE,                          ADC_PIN_NONE,
+                 ADC_PIN_NONE,                          ADC_PIN_NONE,
+                 ADC_PIN_NONE } },
+};
+#elif defined(STM32F410Rx) || \
+    defined(STM32F412Rx) || \
+    defined(STM32F412Vx) || \
+    defined(STM32F412Zx) || \
+    defined(STM32F401xC) || \
+    defined(STM32F401xE) || \
+    defined(STM32F411xE) || \
+    defined(STM32F413xx) || \
+    defined(STM32F423xx)
+/* F410Rx F412Rx F412Vx F412Zx F401xC F401xE F411xE F413xx F423xx */
 static const adc_GpioPeriphConfig_t adc_GpioPeriphConfig[ ADC_PERIPH_CNT ] =
 {
  { .PeriphId = ADC_PERIPH_1,
@@ -199,7 +229,48 @@ static const adc_GpioPeriphConfig_t adc_GpioPeriphConfig[ ADC_PERIPH_CNT ] =
                  ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_4 ), ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_5 ),
                  ADC_PIN_NONE,                          ADC_PIN_NONE,
                  ADC_PIN_NONE } },
-#if defined (ADC2)
+};
+#elif defined(STM32F410Tx)
+/* F410Tx */
+static const adc_GpioPeriphConfig_t adc_GpioPeriphConfig[ ADC_PERIPH_CNT ] =
+{
+ { .PeriphId = ADC_PERIPH_1,
+   .Channel  = { ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_0 ), ADC_PIN_NONE,
+                 ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_2 ), ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_3 ),
+                 ADC_PIN_NONE,                          ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_5 ),
+                 ADC_PIN_NONE,                          ADC_PIN_NONE,
+                 ADC_PIN_NONE,                          ADC_PIN_NONE,
+                 ADC_PIN_NONE,                          ADC_PIN_NONE,
+                 ADC_PIN_NONE,                          ADC_PIN_NONE,
+                 ADC_PIN_NONE,                          ADC_PIN_NONE,
+                 ADC_PIN_NONE,                          ADC_PIN_NONE,
+                 ADC_PIN_NONE } },
+};
+#elif defined(STM32F405xx) || \
+    defined(STM32F407xx) || \
+    defined(STM32F415xx) || \
+    defined(STM32F417xx) || \
+    defined(STM32F427xx) || \
+    defined(STM32F429xx) || \
+    defined(STM32F437xx) || \
+    defined(STM32F439xx) || \
+    defined(STM32F446xx) || \
+    defined(STM32F469xx) || \
+    defined(STM32F479xx)
+/* F405xx F407xx F415xx F417xx F427xx F429xx F437xx F439xx F446xx F469xx F479xx */
+static const adc_GpioPeriphConfig_t adc_GpioPeriphConfig[ ADC_PERIPH_CNT ] =
+{
+ { .PeriphId = ADC_PERIPH_1,
+   .Channel  = { ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_0 ), ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_1 ),
+                 ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_2 ), ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_3 ),
+                 ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_4 ), ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_5 ),
+                 ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_6 ), ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_7 ),
+                 ADC_PIN( GPIO_PORT_B, GPIO_PIN_ID_0 ), ADC_PIN( GPIO_PORT_B, GPIO_PIN_ID_1 ),
+                 ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_0 ), ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_1 ),
+                 ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_2 ), ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_3 ),
+                 ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_4 ), ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_5 ),
+                 ADC_PIN_NONE,                          ADC_PIN_NONE,
+                 ADC_PIN_NONE } },
  { .PeriphId = ADC_PERIPH_2,
    .Channel  = { ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_0 ), ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_1 ),
                  ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_2 ), ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_3 ),
@@ -211,21 +282,21 @@ static const adc_GpioPeriphConfig_t adc_GpioPeriphConfig[ ADC_PERIPH_CNT ] =
                  ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_4 ), ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_5 ),
                  ADC_PIN_NONE,                          ADC_PIN_NONE,
                  ADC_PIN_NONE } },
-#endif /* ADC2 */
-#if defined (ADC3)
  { .PeriphId = ADC_PERIPH_3,
-   .Channel  = { ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_0 ), ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_1  ),
-                 ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_2 ), ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_3  ),
-                 ADC_PIN( GPIO_PORT_F, GPIO_PIN_ID_6 ), ADC_PIN( GPIO_PORT_F, GPIO_PIN_ID_7  ),
-                 ADC_PIN( GPIO_PORT_F, GPIO_PIN_ID_8 ), ADC_PIN( GPIO_PORT_F, GPIO_PIN_ID_9  ),
-                 ADC_PIN( GPIO_PORT_F, GPIO_PIN_ID_10), ADC_PIN( GPIO_PORT_F, GPIO_PIN_ID_3  ),
-                 ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_0 ), ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_1  ),
-                 ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_2 ), ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_3  ),
-                 ADC_PIN( GPIO_PORT_F, GPIO_PIN_ID_4 ), ADC_PIN( GPIO_PORT_F, GPIO_PIN_ID_5  ),
+   .Channel  = { ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_0 ), ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_1 ),
+                 ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_2 ), ADC_PIN( GPIO_PORT_A, GPIO_PIN_ID_3 ),
+                 ADC_PIN( GPIO_PORT_F, GPIO_PIN_ID_6 ), ADC_PIN( GPIO_PORT_F, GPIO_PIN_ID_7 ),
+                 ADC_PIN( GPIO_PORT_F, GPIO_PIN_ID_8 ), ADC_PIN( GPIO_PORT_F, GPIO_PIN_ID_9 ),
+                 ADC_PIN( GPIO_PORT_F, GPIO_PIN_ID_10 ), ADC_PIN( GPIO_PORT_F, GPIO_PIN_ID_3 ),
+                 ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_0 ), ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_1 ),
+                 ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_2 ), ADC_PIN( GPIO_PORT_C, GPIO_PIN_ID_3 ),
+                 ADC_PIN( GPIO_PORT_F, GPIO_PIN_ID_4 ), ADC_PIN( GPIO_PORT_F, GPIO_PIN_ID_5 ),
                  ADC_PIN_NONE,                          ADC_PIN_NONE,
                  ADC_PIN_NONE } },
-#endif /* ADC3 */
 };
+#else
+    #error "Adc: F4 device line is not defined."
+#endif /* device line */
 
 /** CMSIS instance and RCC clock lookup, indexed by adc_PeriphId_t. All ADC peripherals
  *  share one common register block (ADC1_COMMON / ADC12_COMMON / ADC123_COMMON). */

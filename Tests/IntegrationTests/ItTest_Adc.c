@@ -581,8 +581,7 @@ static void It_Adc_Get_Config( adc_Config_t * const config, adc_TransferMode_t t
         periphCfg->DataConfig.DataBuffer               = itAdc_Buffer;
         periphCfg->DataConfig.BufferSize               = bufferSize;
         periphCfg->DataConfig.BufferMode               = bufferMode;
-        periphCfg->DataConfig.DmaPeriphId              = ADC_DMA_PERIPH_2;
-        periphCfg->DataConfig.DmaChannelId             = ADC_DMA_CHANNEL_0;
+        periphCfg->DataConfig.Dma                      = ADC_DMA_UNUSED;
         periphCfg->DataConfig.DmaPriority              = ADC_DMA_PRIORITY_HIGH;
         periphCfg->DataConfig.IrqPriority              = 5u;
         periphCfg->DataConfig.HalfTransferCallback     = It_Adc_HalfCallback;
@@ -590,6 +589,9 @@ static void It_Adc_Get_Config( adc_Config_t * const config, adc_TransferMode_t t
         periphCfg->DataConfig.ErrorCallback            = It_Adc_ErrorCallback;
         periphCfg->DataConfig.InjCompleteCallback      = It_Adc_InjCallback;
     }
+
+    /* ADC1 is the peripheral of the tests (DMA2 stream 0, channel selection 0) */
+    config->PeriphConfig[ ADC_PERIPH_1 ].DataConfig.Dma = ADC_DMA_ADC1_DMA2_STREAM0;
 
     config->ClockSource  = ADC_CLK_SRC_PCLK2;
     config->ClockDivider = IT_ADC_CLK_DIV;

@@ -8,8 +8,8 @@
  * stream (peripheral to memory, 16-bit, BufferSize items).
  * - The ADC request is connected to a DMA2 stream by channel selection (CHSEL) according to
  *   the request mapping table: ADC1 - stream 0 / 4 channel 0, ADC2 - stream 2 / 3 channel 1,
- *   ADC3 - stream 0 / 1 channel 2. DmaPeriphId / DmaChannelId select the stream, the channel
- *   is selected by the module.
+ *   ADC3 - stream 0 / 1 channel 2. Dma (item of the list adc_Dma_t of the peripheral) selects the
+ *   stream, the channel is selected by the module.
  * - ADC_BUFFER_MODE_CIRCULAR: DMA stream in circular mode, ADC DMA requests are kept after the
  *   last transfer (DDS = 1). ADC_BUFFER_MODE_ONE_SHOT: normal mode, DDS = 0.
  * - Half transfer / transfer complete / DMA transfer errors are reported from DMA interrupt.
@@ -56,7 +56,7 @@ typedef struct
 
 /* ======================== FORWARD DECLARATIONS ============================ */
 
-static adc_RequestState_t Adc_Dma_Check_Stream  ( adc_PeriphId_t periphId, adc_DmaPeriphId_t dmaPeriphId, adc_DmaChannelId_t dmaChannelId );
+static adc_RequestState_t Adc_Dma_Check_Stream  ( adc_PeriphId_t periphId, adc_DmaCode_t dmaCode );
 static adc_RequestState_t Adc_Dma_Set_Request   ( adc_PeriphId_t periphId, uint32_t llDmaMode );
 
 static void               Adc_Dma_Adc1XferCplt  ( void );
@@ -132,7 +132,7 @@ adc_RequestState_t Adc_Dma_Check_Config( adc_PeriphId_t periphId, const adc_Data
         ( ADC_NULL_PTR  != dataConfig )    )
     {
         const adc_RequestState_t isrState    = Adc_Isr_Check_Config( periphId, dataConfig );
-        const adc_RequestState_t streamState = Adc_Dma_Check_Stream( periphId, dataConfig->DmaPeriphId, dataConfig->DmaChannelId );
+        const adc_RequestState_t streamState = Adc_Dma_Check_Stream( periphId, (adc_DmaCode_t)dataConfig->Dma );
 
         if( ( ADC_REQUEST_OK              == isrState                          ) &&
             ( ADC_REQUEST_OK              == streamState                       ) &&
@@ -207,8 +207,9 @@ adc_RequestState_t Adc_Dma_Init( adc_PeriphId_t periphId )
     {
         adc_DmaChannelState_t * const    chState   = &adc_DmaChannelState[ periphId ];
         const adc_DmaReqConfig_t * const reqConfig = &adc_DmaReqConfig[ periphId ];
-        const dma_PeriphId_t             dmaPeriph = (dma_PeriphId_t)xferCtx->Config.DmaPeriphId;
-        const dma_ChannelId_t            dmaStream = (dma_ChannelId_t)xferCtx->Config.DmaChannelId;
+        const adc_DmaCode_t              dmaCode   = (adc_DmaCode_t)xferCtx->Config.Dma;
+        const dma_PeriphId_t             dmaPeriph = (dma_PeriphId_t)ADC_DMA_BIT_MASK_DECODE_DMA( dmaCode );
+        const dma_ChannelId_t            dmaStream = (dma_ChannelId_t)ADC_DMA_BIT_MASK_DECODE_STREAM( dmaCode );
         dma_ConfigStruct_t               dmaConfig;
         dma_RequestState_t               dmaState  = Dma_Get_DefaultConfig( &dmaConfig );
 
@@ -245,8 +246,8 @@ adc_RequestState_t Adc_Dma_Init( adc_PeriphId_t periphId )
         if( DMA_REQUEST_OK == dmaState )
         {
             chState->Initialized = ADC_FUNCTION_ACTIVE;
-            chState->PeriphId    = xferCtx->Config.DmaPeriphId;
-            chState->ChannelId   = xferCtx->Config.DmaChannelId;
+            chState->PeriphId    = (adc_DmaPeriphId_t)dmaPeriph;
+            chState->ChannelId   = (adc_DmaChannelId_t)dmaStream;
 
             dmaState = Dma_Set_TransferCompleteIrqActive( dmaPeriph, dmaStream );
         }
@@ -490,25 +491,31 @@ adc_RequestState_t Adc_Dma_Stop( adc_PeriphId_t periphId )
 /**
  * \brief Checks that the DMA stream serves the ADC request of the peripheral
  *
- * \param periphId     [in]: ADC peripheral identification, value from \ref adc_PeriphId_t
- * \param dmaPeriphId  [in]: DMA peripheral, value from \ref adc_DmaPeriphId_t
- * \param dmaChannelId [in]: DMA stream, value from \ref adc_DmaChannelId_t
+ * The DMA peripheral and the stream are decoded from the item of the DMA stream list, the item has to
+ * belong to the ADC peripheral.
+ *
+ * \param periphId [in]: ADC peripheral identification, value from \ref adc_PeriphId_t
+ * \param dmaCode  [in]: Item of \ref adc_Dma_t (encoded DMA stream)
  *
  * \return Returns \ref ADC_REQUEST_OK if the stream is connected to the ADC request. Otherwise
  *         returns \ref ADC_REQUEST_ERROR.
  */
-static adc_RequestState_t Adc_Dma_Check_Stream( adc_PeriphId_t periphId, adc_DmaPeriphId_t dmaPeriphId, adc_DmaChannelId_t dmaChannelId )
+static adc_RequestState_t Adc_Dma_Check_Stream( adc_PeriphId_t periphId, adc_DmaCode_t dmaCode )
 {
-    adc_RequestState_t retState = ADC_REQUEST_ERROR;
+    adc_RequestState_t retState   = ADC_REQUEST_ERROR;
+    const uint32_t     codePeriph = ADC_DMA_BIT_MASK_DECODE_PERIPH( dmaCode );
+    const uint32_t     codeDmaId  = ADC_DMA_BIT_MASK_DECODE_DMA( dmaCode );
+    const uint32_t     codeStream = ADC_DMA_BIT_MASK_DECODE_STREAM( dmaCode );
 
-    if( ADC_PERIPH_CNT > periphId )
+    if( ( ADC_PERIPH_CNT >  periphId           ) &&
+        ( codePeriph     == (uint32_t)periphId )    )
     {
         for( uint32_t streamIdx = 0u; ADC_DMA_STREAM_CNT > streamIdx; streamIdx ++ )
         {
             const adc_DmaStream_t * const stream = &adc_DmaReqConfig[ periphId ].Stream[ streamIdx ];
 
-            if( ( dmaPeriphId  == stream->DmaPeriphId  ) &&
-                ( dmaChannelId == stream->DmaChannelId )    )
+            if( ( codeDmaId  == (uint32_t)stream->DmaPeriphId  ) &&
+                ( codeStream == (uint32_t)stream->DmaChannelId )    )
             {
                 retState = ADC_REQUEST_OK;
                 break;

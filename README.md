@@ -46,6 +46,13 @@ Different families are maintained in separate branches; users can switch to the 
 - The ADC module is hardware dependent and must be configured per STM32 family branch.  
 - The **default configuration API** helps to ensure safe initialization.  
 - The `Task` function should be periodically called if asynchronous handling or background processing is implemented.  
+- DMA mode: `adc_DataConfig_t::Dma` selects the DMA stream of the ADC request from the list `adc_Dma_t` - one item per ADC
+  peripheral, DMA peripheral and stream, named `ADC_DMA_ADCx_DMAy_STREAMz` (ADC1: DMA2 stream 0 or 4, ADC2: DMA2
+  stream 2 or 3, ADC3: DMA2 stream 0 or 1); the channel selection of the stream is part of the item. An item of
+  another ADC peripheral and `ADC_DMA_UNUSED` are refused in the DMA mode.  
+- Channel pins: the table of the channel pins is generated from the STM32CubeMX database per device line (signals ADCx_INy,
+  union of the packages of the devices of the line) - a channel has a pin only on the device lines that have it (e.g. the
+  channels 10 - 15 on PC0 - PC5 are not on STM32F410Cx / STM32F410Tx / STM32F412Cx); a channel without a pin is refused for the pin input.  
 
 ---
 

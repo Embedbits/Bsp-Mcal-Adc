@@ -29,7 +29,50 @@
 /** Null pointer definition */
 #define ADC_NULL_PTR                        ( ( void* ) 0u )
 
+/** ADC peripheral identification bit offset in encoded DMA stream value */
+#define ADC_DMA_BIT_MASK_PERIPH_BIT_OFFSET  ( 15u )
+
+/** DMA peripheral identification bit offset in encoded DMA stream value */
+#define ADC_DMA_BIT_MASK_DMA_BIT_OFFSET     ( 10u )
+
+/** Stream identification bit offset in encoded DMA stream value */
+#define ADC_DMA_BIT_MASK_STREAM_BIT_OFFSET  ( 5u )
+
+/** Channel selection (CHSEL) bit offset in encoded DMA stream value */
+#define ADC_DMA_BIT_MASK_CHSEL_BIT_OFFSET   ( 0u )
+
+/** Mask of one field (5 bits) in encoded DMA stream value */
+#define ADC_DMA_BIT_MASK_FIELD              ( 0x1Fu )
+
 /* ========================== EXPORTED MACROS =============================== */
+
+/**
+ * \brief Encodes DMA stream (ADC peripheral, DMA peripheral, stream, channel selection) into single
+ *        value of \ref adc_DmaCode_t
+ *
+ * The macro defines the values of the DMA stream list \ref adc_Dma_t, e.g. the
+ * ADC1 request on DMA2 stream 0 (channel selection 0) is \ref ADC_DMA_ADC1_DMA2_STREAM0:
+ * ADC_DMA_ENCODE( ADC_PERIPH_1, ADC_DMA_PERIPH_2, ADC_DMA_CHANNEL_0, 0u )
+ */
+#define ADC_DMA_ENCODE( PERIPH_ID, DMA_ID, STREAM_ID, CHSEL )   ( (adc_DmaCode_t)( ( (uint32_t)(PERIPH_ID) << ADC_DMA_BIT_MASK_PERIPH_BIT_OFFSET ) | \
+                                                                                   ( (uint32_t)(DMA_ID)    << ADC_DMA_BIT_MASK_DMA_BIT_OFFSET    ) | \
+                                                                                   ( (uint32_t)(STREAM_ID) << ADC_DMA_BIT_MASK_STREAM_BIT_OFFSET ) | \
+                                                                                   ( (uint32_t)(CHSEL)     << ADC_DMA_BIT_MASK_CHSEL_BIT_OFFSET  )   ) )
+
+/** Stream is not configured by the module (value of the *_DMA_UNUSED items of the DMA stream lists) */
+#define ADC_DMA_CODE_UNUSED                 ADC_DMA_ENCODE( ADC_PERIPH_CNT, ADC_DMA_PERIPH_CNT, ADC_DMA_CHANNEL_CNT, 0u )
+
+/** Extract ADC peripheral ID from encoded DMA stream value */
+#define ADC_DMA_BIT_MASK_DECODE_PERIPH( CODED_VAL ) ( ( (CODED_VAL) >> ADC_DMA_BIT_MASK_PERIPH_BIT_OFFSET ) & ADC_DMA_BIT_MASK_FIELD )
+
+/** Extract DMA peripheral ID from encoded DMA stream value */
+#define ADC_DMA_BIT_MASK_DECODE_DMA( CODED_VAL )    ( ( (CODED_VAL) >> ADC_DMA_BIT_MASK_DMA_BIT_OFFSET ) & ADC_DMA_BIT_MASK_FIELD )
+
+/** Extract stream ID from encoded DMA stream value */
+#define ADC_DMA_BIT_MASK_DECODE_STREAM( CODED_VAL ) ( ( (CODED_VAL) >> ADC_DMA_BIT_MASK_STREAM_BIT_OFFSET ) & ADC_DMA_BIT_MASK_FIELD )
+
+/** Extract channel selection (CHSEL) from encoded DMA stream value */
+#define ADC_DMA_BIT_MASK_DECODE_CHSEL( CODED_VAL )  ( ( (CODED_VAL) >> ADC_DMA_BIT_MASK_CHSEL_BIT_OFFSET ) & ADC_DMA_BIT_MASK_FIELD )
 
 /* ============================== TYPEDEFS ================================== */
 
@@ -484,6 +527,10 @@ typedef enum
 }   adc_ErrorId_t;
 
 
+/** \brief Encoded DMA stream (value of \ref adc_Dma_t) */
+typedef uint32_t adc_DmaCode_t;
+
+
 /** DMA peripherals enumeration list */
 typedef enum
 {
@@ -497,8 +544,9 @@ typedef enum
 
 /** \brief Enumeration of available DMA streams
  *
- * \note Streams of the ADC requests (DMA2, channel selection is done by the module):
- *       ADC1 - stream 0 or 4, ADC2 - stream 2 or 3, ADC3 - stream 0 or 1. */
+ * \note Streams of the ADC requests (DMA2): ADC1 - stream 0 or 4, ADC2 - stream 2 or 3,
+ *       ADC3 - stream 0 or 1. The streams usable by the ADC peripherals are given by the
+ *       list \ref adc_Dma_t. */
 typedef enum
 {
     ADC_DMA_CHANNEL_0 = DMA_STREAM_0, /**< DMA stream 0 */
@@ -511,6 +559,27 @@ typedef enum
     ADC_DMA_CHANNEL_7 = DMA_STREAM_7, /**< DMA stream 7 */
     ADC_DMA_CHANNEL_CNT               /**< Count of DMA streams  */
 }   adc_DmaChannelId_t;
+
+
+/**
+ * \brief List of DMA streams able to serve the ADC regular group of the peripherals (STM32CubeMX database / reference
+ *        manual DMA request mapping, the channel selection of the stream is part of the value, streams
+ *        existing only on some STM32F4 lines are guarded by the CMSIS device line)
+ */
+typedef enum
+{
+    ADC_DMA_ADC1_DMA2_STREAM0          = ADC_DMA_ENCODE( ADC_PERIPH_1, ADC_DMA_PERIPH_2, ADC_DMA_CHANNEL_0, 0u ), /**< ADC1 request on DMA2 stream 0 (channel selection 0) */
+    ADC_DMA_ADC1_DMA2_STREAM4          = ADC_DMA_ENCODE( ADC_PERIPH_1, ADC_DMA_PERIPH_2, ADC_DMA_CHANNEL_4, 0u ), /**< ADC1 request on DMA2 stream 4 (channel selection 0) */
+#if defined(ADC2)
+    ADC_DMA_ADC2_DMA2_STREAM2          = ADC_DMA_ENCODE( ADC_PERIPH_2, ADC_DMA_PERIPH_2, ADC_DMA_CHANNEL_2, 1u ), /**< ADC2 request on DMA2 stream 2 (channel selection 1) */
+    ADC_DMA_ADC2_DMA2_STREAM3          = ADC_DMA_ENCODE( ADC_PERIPH_2, ADC_DMA_PERIPH_2, ADC_DMA_CHANNEL_3, 1u ), /**< ADC2 request on DMA2 stream 3 (channel selection 1) */
+#endif
+#if defined(ADC3)
+    ADC_DMA_ADC3_DMA2_STREAM0          = ADC_DMA_ENCODE( ADC_PERIPH_3, ADC_DMA_PERIPH_2, ADC_DMA_CHANNEL_0, 2u ), /**< ADC3 request on DMA2 stream 0 (channel selection 2) */
+    ADC_DMA_ADC3_DMA2_STREAM1          = ADC_DMA_ENCODE( ADC_PERIPH_3, ADC_DMA_PERIPH_2, ADC_DMA_CHANNEL_1, 2u ), /**< ADC3 request on DMA2 stream 1 (channel selection 2) */
+#endif
+    ADC_DMA_UNUSED                     = ADC_DMA_CODE_UNUSED  /**< DMA stream is not selected */
+}   adc_Dma_t;
 
 
 /** DMA channel priority options enumeration */
@@ -549,7 +618,8 @@ typedef void ( adc_ErrCallback_t )( adc_ErrorId_t errorId );
  * - InjCompleteCallback:      injected sequence converted (JEOC), results are read by Adc_Get_InjData()
  *
  * Unused callback shall be set to ADC_NULL_PTR (related interrupt is not activated).
- * DmaPeriphId / DmaChannelId / DmaPriority are used only in ADC_TRANSFER_MODE_DMA,
+ * Dma (item of the list \ref adc_Dma_t of the configured ADC peripheral, ADC_DMA_UNUSED in other
+ * modes) / DmaPriority are used only in ADC_TRANSFER_MODE_DMA,
  * IrqPriority is not used in ADC_TRANSFER_MODE_POLL.
  */
 typedef struct
@@ -559,8 +629,7 @@ typedef struct
     adc_BufferSize_t    BufferSize;               /**< Buffer size in count of adc_Data_t items (> 0)                */
     adc_BufferMode_t    BufferMode;               /**< One shot / circular buffer handling                           */
 
-    adc_DmaPeriphId_t   DmaPeriphId;              /**< DMA peripheral (DMA mode only)                                */
-    adc_DmaChannelId_t  DmaChannelId;             /**< DMA stream (DMA mode only)                                    */
+    adc_Dma_t           Dma;                      /**< DMA stream of the ADC request (DMA mode only)                 */
     adc_DmaPriority_t   DmaPriority;              /**< DMA stream priority (DMA mode only)                           */
 
     adc_IrqPrio_t       IrqPriority;              /**< ADC (ISR mode) / DMA (DMA mode) interrupt priority            */
