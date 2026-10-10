@@ -20,33 +20,23 @@ Different families are maintained in separate branches; users can switch to the 
 
 ### Module Information
 
-- ```c
-  adc_ModuleVersion_t Adc_Get_ModuleVersion ( void );
-  ```  
+- `adc_ModuleVersion_t Adc_Get_ModuleVersion ( void );`  
   Returns the current version of the ADC module.
 
 ---
 
 ### Initialization
 
-  ```c
-- adc_RequestState_t Adc_Init ( adc_PeriphConfig_t * const adcConfig );
-  ```  
+- `adc_RequestState_t Adc_Init ( adc_PeriphConfig_t * const adcConfig );`  
   Initializes the ADC peripheral with the provided configuration.
 
-  ```c
-- adc_RequestState_t Adc_Deinit ( adc_PeriphConfig_t * const adcConfig );
-  ```  
+- `adc_RequestState_t Adc_Deinit ( adc_PeriphConfig_t * const adcConfig );`  
   Deinitializes the ADC peripheral and resets the configuration.
 
-  ```c
-- void Adc_Task ( void );
-  ```  
+- `void Adc_Task ( void );`  
   Handles ADC-related periodic tasks (if required by the implementation).
 
-  ```c
-- adc_RequestState_t Adc_Get_DefaultConfig ( adc_PeriphConfig_t * const adcConfig );
-  ```  
+- `adc_RequestState_t Adc_Get_DefaultConfig ( adc_PeriphConfig_t * const adcConfig );`  
   Retrieves a default configuration structure for ADC initialization.
 
 ---
@@ -56,6 +46,18 @@ Different families are maintained in separate branches; users can switch to the 
 - The ADC module is hardware dependent and must be configured per STM32 family branch.  
 - The **default configuration API** helps to ensure safe initialization.  
 - The `Task` function should be periodically called if asynchronous handling or background processing is implemented.  
+- DMA mode: `adc_DataConfig_t::Dma` selects the DMA stream of the ADC request from the list `adc_Dma_t` - one item per ADC
+  peripheral, DMA peripheral and stream, named `ADC_DMA_ADCx_DMAy_STREAMz` (ADC1: DMA2 stream 0 or 4, ADC2: DMA2
+  stream 2 or 3, ADC3: DMA2 stream 0 or 1); the channel selection of the stream is part of the item. An item of
+  another ADC peripheral and `ADC_DMA_UNUSED` are refused in the DMA mode.  
+
+### STM32F7 device errata (ES0334)
+
+- **Internal noise impacting the ADC accuracy** - not handled by the module. The accuracy options of
+  the errata sheet (ADCDC1 in PWR_CR1 or ADCxDC2 in SYSCFG_PMC, only one of them, see AN4073) depend
+  on the application (ADC clock, conversion timing of the ADC instances) and are not set.
+- **ADC sequencer modification during conversion** - not affected: the regular and injected
+  sequencers are written by `Adc_Init()` only, before any conversion is started.
 
 ---
 
