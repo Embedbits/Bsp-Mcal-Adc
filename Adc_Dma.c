@@ -56,6 +56,11 @@ static void               Adc_Dma_Adc2XferCplt  ( void );
 static void               Adc_Dma_Adc2HalfXfer  ( void );
 static void               Adc_Dma_Adc2Error     ( gpdma_ErrorMaskId_t errorMask );
 #endif /* ADC2 */
+#if defined (ADC3)
+static void               Adc_Dma_Adc3XferCplt  ( void );
+static void               Adc_Dma_Adc3HalfXfer  ( void );
+static void               Adc_Dma_Adc3Error     ( gpdma_ErrorMaskId_t errorMask );
+#endif /* ADC3 */
 
 /* ========================== SYMBOLIC CONSTANTS ============================ */
 
@@ -83,7 +88,7 @@ static void               Adc_Dma_Adc2Error     ( gpdma_ErrorMaskId_t errorMask 
 
 /* =========================== LOCAL VARIABLES ============================== */
 
-/** adc_PeriphId_t -> GPDMA request and handlers. ADC3 request is not provided by the GPDMA module yet. */
+/** adc_PeriphId_t -> GPDMA request and handlers */
 static const adc_DmaReqConfig_t adc_DmaReqConfig[ ] =
 {
     { .Available = ADC_FUNCTION_ACTIVE,   .Request = GPDMA_REQ_ADC1, .XferCpltIsr = Adc_Dma_Adc1XferCplt, .HalfXferIsr = Adc_Dma_Adc1HalfXfer, .ErrorIsr = Adc_Dma_Adc1Error },
@@ -91,7 +96,7 @@ static const adc_DmaReqConfig_t adc_DmaReqConfig[ ] =
     { .Available = ADC_FUNCTION_ACTIVE,   .Request = GPDMA_REQ_ADC2, .XferCpltIsr = Adc_Dma_Adc2XferCplt, .HalfXferIsr = Adc_Dma_Adc2HalfXfer, .ErrorIsr = Adc_Dma_Adc2Error },
 #endif /* ADC2 */
 #if defined (ADC3)
-    { .Available = ADC_FUNCTION_INACTIVE, .Request = GPDMA_REQ_ADC1, .XferCpltIsr = GPDMA_NULL_PTR,       .HalfXferIsr = GPDMA_NULL_PTR,       .ErrorIsr = GPDMA_NULL_PTR    },
+    { .Available = ADC_FUNCTION_ACTIVE,   .Request = GPDMA_REQ_ADC3, .XferCpltIsr = Adc_Dma_Adc3XferCplt, .HalfXferIsr = Adc_Dma_Adc3HalfXfer, .ErrorIsr = Adc_Dma_Adc3Error },
 #endif /* ADC3 */
 };
 
@@ -245,7 +250,8 @@ adc_RequestState_t Adc_Dma_Init( adc_PeriphId_t periphId )
             /* Channel is already configured for this peripheral - priority and half transfer are updated */
             dmaState = Gpdma_Set_Priority( dmaPeriph, dmaChan, (gpdma_Priority_t)xferCtx->Config.DmaPriority );
 
-            if( ( GPDMA_REQUEST_OK == dmaState ) && ( ADC_NULL_PTR != xferCtx->Config.HalfTransferCallback ) )
+            if( ( GPDMA_REQUEST_OK == dmaState ) &&
+                ( ADC_NULL_PTR != xferCtx->Config.HalfTransferCallback )    )
             {
                 dmaState = Gpdma_Set_HalfTransferIsrHandler( dmaPeriph, dmaChan, reqConfig->HalfXferIsr );
 
@@ -393,7 +399,8 @@ adc_RequestState_t Adc_Dma_Deinit( adc_PeriphId_t periphId )
 
     retState = Adc_Get_PeriphReg( periphId, &periphReg );
 
-    if( ( ADC_REQUEST_OK == retState ) && ( ADC_FUNCTION_ACTIVE == adc_DmaChannelState[ periphId ].Initialized ) )
+    if( ( ADC_REQUEST_OK == retState ) &&
+        ( ADC_FUNCTION_ACTIVE == adc_DmaChannelState[ periphId ].Initialized )    )
     {
         const gpdma_PeriphId_t  dmaPeriph = (gpdma_PeriphId_t)adc_DmaChannelState[ periphId ].PeriphId;
         const gpdma_ChannelId_t dmaChan   = (gpdma_ChannelId_t)adc_DmaChannelState[ periphId ].ChannelId;
@@ -492,7 +499,8 @@ adc_RequestState_t Adc_Dma_Stop( adc_PeriphId_t periphId )
 {
     adc_RequestState_t retState = ADC_REQUEST_ERROR;
 
-    if( ( ADC_PERIPH_CNT > periphId ) && ( ADC_FUNCTION_ACTIVE == adc_DmaChannelState[ periphId ].Initialized ) )
+    if( ( ADC_PERIPH_CNT > periphId ) &&
+        ( ADC_FUNCTION_ACTIVE == adc_DmaChannelState[ periphId ].Initialized )    )
     {
         const gpdma_RequestState_t dmaState = Gpdma_Set_ChannelInactive( (gpdma_PeriphId_t)adc_DmaChannelState[ periphId ].PeriphId,
                                                                          (gpdma_ChannelId_t)adc_DmaChannelState[ periphId ].ChannelId );
@@ -531,7 +539,8 @@ static adc_RequestState_t Adc_Dma_Set_Transfer( adc_PeriphId_t periphId )
 
     retState = Adc_Get_XferContext( periphId, &xferCtx );
 
-    if( ( ADC_REQUEST_OK == retState ) && ( ADC_FUNCTION_ACTIVE == adc_DmaChannelState[ periphId ].Initialized ) )
+    if( ( ADC_REQUEST_OK == retState ) &&
+        ( ADC_FUNCTION_ACTIVE == adc_DmaChannelState[ periphId ].Initialized )    )
     {
         const gpdma_PeriphId_t  dmaPeriph = (gpdma_PeriphId_t)adc_DmaChannelState[ periphId ].PeriphId;
         const gpdma_ChannelId_t dmaChan   = (gpdma_ChannelId_t)adc_DmaChannelState[ periphId ].ChannelId;
@@ -589,7 +598,8 @@ static adc_RequestState_t Adc_Dma_XferCplt( adc_PeriphId_t periphId )
 
     retState = Adc_Get_XferContext( periphId, &xferCtx );
 
-    if( ( ADC_REQUEST_OK == retState ) && ( ADC_BUFFER_MODE_CIRCULAR == xferCtx->Config.BufferMode ) )
+    if( ( ADC_REQUEST_OK == retState ) &&
+        ( ADC_BUFFER_MODE_CIRCULAR == xferCtx->Config.BufferMode )    )
     {
         /* Channel is disabled by HW at the end of the block - it is armed again immediately */
         retState = Adc_Dma_Set_Transfer( periphId );
@@ -693,5 +703,32 @@ static void Adc_Dma_Adc2Error( gpdma_ErrorMaskId_t errorMask )
     (void)Adc_Dma_XferError( ADC_PERIPH_2, errorMask );
 }
 #endif /* ADC2 */
+
+
+#if defined (ADC3)
+/** \brief ADC3 DMA transfer complete handler (registered in GPDMA module) */
+static void Adc_Dma_Adc3XferCplt( void )
+{
+    (void)Adc_Dma_XferCplt( ADC_PERIPH_3 );
+}
+
+
+/** \brief ADC3 DMA half transfer handler (registered in GPDMA module) */
+static void Adc_Dma_Adc3HalfXfer( void )
+{
+    (void)Adc_Set_XferHalf( ADC_PERIPH_3 );
+}
+
+
+/**
+ * \brief ADC3 DMA error handler (registered in GPDMA module)
+ *
+ * \param errorMask [in]: Mask of GPDMA errors reported by the channel.
+ */
+static void Adc_Dma_Adc3Error( gpdma_ErrorMaskId_t errorMask )
+{
+    (void)Adc_Dma_XferError( ADC_PERIPH_3, errorMask );
+}
+#endif /* ADC3 */
 
 /* ================================ TASKS =================================== */

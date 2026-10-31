@@ -31,6 +31,9 @@ static void               Adc_Isr_Adc1Handler ( void );
 #if defined (ADC2)
 static void               Adc_Isr_Adc2Handler ( void );
 #endif /* ADC2 */
+#if defined (ADC3)
+static void               Adc_Isr_Adc3Handler ( void );
+#endif /* ADC3 */
 static adc_RequestState_t Adc_Isr_Handler     ( adc_PeriphId_t periphId );
 
 /* ========================== SYMBOLIC CONSTANTS ============================ */
@@ -44,7 +47,7 @@ static adc_RequestState_t Adc_Isr_Handler     ( adc_PeriphId_t periphId );
 
 /* =========================== LOCAL VARIABLES ============================== */
 
-/** adc_PeriphId_t -> ADC interrupt. ADC3 interrupt is not provided by the NVIC module yet. */
+/** adc_PeriphId_t -> ADC interrupt */
 static const adc_IsrIrqConfig_t adc_IsrIrqConfig[ ] =
 {
     { .Available = ADC_FUNCTION_ACTIVE,   .IrqId = NVIC_PERIPH_IRQ_ADC1, .Handler = Adc_Isr_Adc1Handler },
@@ -52,7 +55,7 @@ static const adc_IsrIrqConfig_t adc_IsrIrqConfig[ ] =
     { .Available = ADC_FUNCTION_ACTIVE,   .IrqId = NVIC_PERIPH_IRQ_ADC2, .Handler = Adc_Isr_Adc2Handler },
 #endif /* ADC2 */
 #if defined (ADC3)
-    { .Available = ADC_FUNCTION_INACTIVE, .IrqId = NVIC_PERIPH_IRQ_ADC1, .Handler = NVIC_NULL_PTR       },
+    { .Available = ADC_FUNCTION_ACTIVE,   .IrqId = NVIC_PERIPH_IRQ_ADC3, .Handler = Adc_Isr_Adc3Handler },
 #endif /* ADC3 */
 };
 
@@ -158,7 +161,8 @@ adc_RequestState_t Adc_Isr_Init( adc_PeriphId_t periphId )
     }
 
     /* Injected end of sequence is reported independently of regular data transfer */
-    if( ( ADC_REQUEST_OK == retState ) && ( ADC_NULL_PTR != xferCtx->Config.InjCompleteCallback ) )
+    if( ( ADC_REQUEST_OK == retState ) &&
+        ( ADC_NULL_PTR != xferCtx->Config.InjCompleteCallback )    )
     {
         retState = Adc_Isr_Set_IrqActive( periphId, LL_ADC_IT_JEOS );
     }
@@ -185,7 +189,8 @@ adc_RequestState_t Adc_Isr_Deinit( adc_PeriphId_t periphId )
 
     retState = Adc_Isr_Set_IrqInactive( periphId, ADC_ISR_IT_ALL );
 
-    if( ( ADC_REQUEST_OK == retState ) && ( ADC_FUNCTION_ACTIVE == adc_IsrIrqConfig[ periphId ].Available ) )
+    if( ( ADC_REQUEST_OK == retState ) &&
+        ( ADC_FUNCTION_ACTIVE == adc_IsrIrqConfig[ periphId ].Available )    )
     {
         const nvic_RequestState_t nvicState = Nvic_Set_PeriphIrq_Inactive( adc_IsrIrqConfig[ periphId ].IrqId );
 
@@ -259,7 +264,8 @@ adc_RequestState_t Adc_Isr_Set_IrqActive( adc_PeriphId_t periphId, uint32_t llIt
 
     retState = Adc_Get_PeriphReg( periphId, &periphReg );
 
-    if( ( ADC_REQUEST_OK == retState ) && ( llItMask == ( llItMask & ADC_ISR_IT_ALL ) ) )
+    if( ( ADC_REQUEST_OK == retState ) &&
+        ( llItMask == ( llItMask & ADC_ISR_IT_ALL ) )    )
     {
         /* Stale events are cleared, interrupt flags use the same bit positions as enable bits */
         WRITE_REG( periphReg->ISR, llItMask );
@@ -306,7 +312,8 @@ adc_RequestState_t Adc_Isr_Set_IrqInactive( adc_PeriphId_t periphId, uint32_t ll
 
     retState = Adc_Get_PeriphReg( periphId, &periphReg );
 
-    if( ( ADC_REQUEST_OK == retState ) && ( llItMask == ( llItMask & ADC_ISR_IT_ALL ) ) )
+    if( ( ADC_REQUEST_OK == retState ) &&
+        ( llItMask == ( llItMask & ADC_ISR_IT_ALL ) )    )
     {
         CLEAR_BIT( periphReg->IER, llItMask );
 
@@ -413,5 +420,14 @@ static void Adc_Isr_Adc2Handler( void )
     (void)Adc_Isr_Handler( ADC_PERIPH_2 );
 }
 #endif /* ADC2 */
+
+
+#if defined (ADC3)
+/** \brief ADC3 interrupt handler (registered in NVIC by Adc_Isr_Init()) */
+static void Adc_Isr_Adc3Handler( void )
+{
+    (void)Adc_Isr_Handler( ADC_PERIPH_3 );
+}
+#endif /* ADC3 */
 
 /* ================================ TASKS =================================== */

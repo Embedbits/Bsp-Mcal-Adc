@@ -125,12 +125,60 @@ static void                 Ut_Adc_ErrorCallback        ( adc_ErrorId_t errorId 
 /** ADC CR bits written by the module and handled by HW model */
 #define UT_ADC_CR_HW_BITS                   ( ADC_CR_ADCAL | ADC_CR_ADDIS | ADC_CR_ADSTP | ADC_CR_JADSTP )
 
+/** Regular group conversion mode bits of ADC_CFGR (RM0481 Rev 5 28.6.4): CONT bit 13, DISCEN bit 16,
+ *  DISCNUM[2:0] bits 19:17 (count of ranks - 1), JAUTO bit 25 */
+#define UT_ADC_CFGR_CONT                    ( 1uL << 13u )
+#define UT_ADC_CFGR_DISCEN                  ( 1uL << 16u )
+#define UT_ADC_CFGR_DISCNUM_POS             ( 17u )
+#define UT_ADC_CFGR_DISCNUM_MAX             ( 7uL )
+#define UT_ADC_CFGR_JAUTO                   ( 1uL << 25u )
+#define UT_ADC_CFGR_MODE_BITS               ( UT_ADC_CFGR_CONT | UT_ADC_CFGR_DISCEN | ( UT_ADC_CFGR_DISCNUM_MAX << UT_ADC_CFGR_DISCNUM_POS ) )
+
+/** Count of regular discontinuous modes (1 - 8 ranks per trigger) */
+#define UT_ADC_DISCONT_MODE_CNT             ( 8u )
+
+/** Analog watch-dog 1 channel selection bits of ADC_CFGR (RM0481 Rev 5 28.6.4): AWD1CH[4:0] bits 30:26,
+ *  JAWD1EN bit 24, AWD1EN bit 23, AWD1SGL bit 22 */
+#define UT_ADC_CFGR_AWD1CH_POS              ( 26u )
+#define UT_ADC_CFGR_AWD1CH_MAX              ( 0x1FuL )
+#define UT_ADC_CFGR_JAWD1EN                 ( 1uL << 24u )
+#define UT_ADC_CFGR_AWD1EN                  ( 1uL << 23u )
+#define UT_ADC_CFGR_AWD1SGL                 ( 1uL << 22u )
+#define UT_ADC_CFGR_AWD1_BITS               ( ( UT_ADC_CFGR_AWD1CH_MAX << UT_ADC_CFGR_AWD1CH_POS ) | UT_ADC_CFGR_JAWD1EN | UT_ADC_CFGR_AWD1EN | UT_ADC_CFGR_AWD1SGL )
+
+/** Analog watch-dog 2 / 3 channel selection AWDxCH[19:0] (RM0481 Rev 5 28.6.19, 28.6.20): all 20 channels */
+#define UT_ADC_AWDCR_ALL_CHANNELS           ( 0x000FFFFFuL )
+
+/** Count of ADC channels monitored by analog watch-dog 2 / 3 */
+#define UT_ADC_AWD_CHANNEL_CNT              ( 20u )
+
 /* ============================== MACROS ==================================== */
+
+/** ADC_CFGR value of the regular discontinuous mode converting rankCnt ranks per trigger */
+#define UT_ADC_CFGR_DISCONT( rankCnt )      ( UT_ADC_CFGR_DISCEN | ( ( (uint32_t)(rankCnt) - 1u ) << UT_ADC_CFGR_DISCNUM_POS ) )
+
+/** ADC_CFGR value of analog watch-dog 1 monitoring one channel (groupBits: AWD1EN and / or JAWD1EN) */
+#define UT_ADC_CFGR_AWD1_SINGLE( channel, groupBits )  ( ( (uint32_t)(channel) << UT_ADC_CFGR_AWD1CH_POS ) | UT_ADC_CFGR_AWD1SGL | (groupBits) )
 
 /* ========================== LOCAL VARIABLES =============================== */
 
 /** ISR registered in NVIC for the ADC */
 static nvic_IsrCallback_t       utAdc_Isr;
+
+/** NVIC interrupt expected by the handler registration stub */
+static nvic_PeriphIrqList_t     utAdc_NvicIrq;
+
+/** ADC peripherals handled by the HW model */
+static ADC_TypeDef * const      utAdc_ModelReg[ ] =
+{
+    ADC1,
+#if defined (ADC2)
+    ADC2,
+#endif /* ADC2 */
+#if defined (ADC3)
+    ADC3,
+#endif /* ADC3 */
+};
 
 /** GPIO configuration of the last Gpio_Init call and count of calls */
 static gpio_Config_t            utAdc_GpioConfig;
@@ -179,6 +227,7 @@ void setUp( void )
     Ut_Adc_Release();
 
     utAdc_Isr         = NULL;
+    utAdc_NvicIrq     = UT_ADC_NVIC;
     utAdc_GpioInitCnt = 0u;
     utAdc_HalfCnt     = 0u;
     utAdc_CompleteCnt = 0u;
@@ -648,13 +697,14 @@ void Ut_Adc_PeriphInit_InvalidChannels_ReturnsErrorWithoutAccess( void )
  * \details Calls Adc_PeriphInit() with:
  * - automatic injected conversion without regular group,
  * - automatic injected conversion in single (discontinuous) mode,
+ * - automatic injected conversion with regular discontinuous mode (Task AB#221),
  * - ISR transfer mode without data buffer and with zero buffer size,
  * - invalid transfer mode,
  * - DMA mode with invalid DMA channel and with buffer size UINT16_MAX.
  *
  * \par Expected results
  * - ADC_REQUEST_ERROR is returned in all cases.
- * - ADC CR register is not written (stays 0).
+ * - ADC CR and CFGR registers are not written (stay 0).
  */
 void Ut_Adc_PeriphInit_InvalidInjectedOrData_ReturnsErrorWithoutAccess( void )
 {
@@ -673,6 +723,12 @@ void Ut_Adc_PeriphInit_InvalidInjectedOrData_ReturnsErrorWithoutAccess( void )
     periphConfig.RegChannelsCnt = 1u;
     periphConfig.InjTriggerMode = ADC_INJ_TRIGGER_MODE_SINGLE;
     TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_PeriphInit( &periphConfig ) );
+
+    /* Automatic injected conversion can not be combined with regular discontinuous mode (DISCEN) */
+    periphConfig.InjTriggerMode = ADC_INJ_TRIGGER_MODE_CONTINUOUS;
+    periphConfig.RegTriggerMode = ADC_REG_TRIGGER_MODE_DISCONT_1RANK;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_PeriphInit( &periphConfig ) );
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->CFGR );
 
     /* ISR mode needs data buffer */
     periphConfig = Ut_Adc_Get_PeriphConfig( ADC_TRANSFER_MODE_ISR, 0u );
@@ -805,6 +861,41 @@ void Ut_Adc_PeriphInit_ExternalTriggerContinuous_TriggerConfigured( void )
 
 
 /**
+ * \brief   Adc_PeriphInit() configures the regular discontinuous mode.
+ *
+ * \details Initializes ADC1 with a regular sequence of 3 ranks (VREF, temperature sensor, VREF)
+ *          converted 2 ranks per trigger (ADC_REG_TRIGGER_MODE_DISCONT_2RANKS) and with a
+ *          software triggered injected VREF channel.
+ * \note    Task AB#221: the regular discontinuous mode was not available.
+ *
+ * \par Expected results
+ * - Regular sequence length 3, CFGR: DISCEN = 1, DISCNUM = 1 (2 ranks), CONT = 0, JAUTO = 0.
+ * - Adc_Get_TriggerMode() reads ADC_REG_TRIGGER_MODE_DISCONT_2RANKS back.
+ */
+void Ut_Adc_PeriphInit_RegularDiscontinuous_DiscontinuousModeConfigured( void )
+{
+    adc_PeriphConfig_t   periphConfig = Ut_Adc_Get_PeriphConfig( ADC_TRANSFER_MODE_POLL, 0u );
+    adc_RegTriggerMode_t triggerMode  = ADC_REG_TRIGGER_MODE_CNT;
+
+    periphConfig.RegTriggerMode    = ADC_REG_TRIGGER_MODE_DISCONT_2RANKS;
+    periphConfig.RegChannelsCnt    = 3u;
+    periphConfig.RegChannels[ 1u ].ChannelId       = UT_ADC_TEMP_CHANNEL;
+    periphConfig.RegChannels[ 1u ].ChannelInput    = ADC_CHANNEL_INPUT_TEMP;
+    periphConfig.RegChannels[ 1u ].ChannelSampling = ADC_CHANNEL_SAMPLING_640_5_CYCLES;
+    periphConfig.RegChannels[ 2u ] = periphConfig.RegChannels[ 0u ];
+    periphConfig.InjChannelsCnt    = 1u;
+    periphConfig.InjChannels[ 0u ] = periphConfig.RegChannels[ 0u ];
+
+    Ut_Adc_PeriphInit( &periphConfig );
+
+    TEST_ASSERT_EQUAL_HEX32( LL_ADC_REG_SEQ_SCAN_ENABLE_3RANKS, LL_ADC_REG_GetSequencerLength( UT_ADC_REG ) );
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_CFGR_DISCONT( 2u ), UT_ADC_REG->CFGR & ( UT_ADC_CFGR_MODE_BITS | UT_ADC_CFGR_JAUTO ) );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_TriggerMode( UT_ADC_PERIPH, &triggerMode ) );
+    TEST_ASSERT_EQUAL( ADC_REG_TRIGGER_MODE_DISCONT_2RANKS, triggerMode );
+}
+
+
+/**
  * \brief   Adc_PeriphInit() configures injected sequence.
  *
  * \details Initializes ADC1 with injected group only: VREF (channel 17) and
@@ -867,6 +958,43 @@ void Ut_Adc_PeriphInit_AutoInjected_TrigAutoEnabled( void )
 
     /* Injected group started by regular group only */
     TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Set_InjStart( UT_ADC_PERIPH ) );
+}
+
+
+/**
+ * \brief   Adc_PeriphInit() clears the auto-injected mode of the previous configuration.
+ *
+ * \details Initializes ADC1 with one regular and one injected VREF channel in auto-injected
+ *          mode (ADC_INJ_TRIGGER_AUTO), deinitializes it and initializes it again with the
+ *          regular group only (no injected channel).
+ * \note    Bug AB#1813: JAUTO was written only together with the injected group - the
+ *          auto-injected mode of the previous configuration was kept (Adc_Deinit() does not
+ *          reset ADC_CFGR).
+ *
+ * \par Expected results
+ * - JAUTO = 1 after the 1st initialization.
+ * - Adc_Deinit() and the 2nd initialization return ADC_REQUEST_OK, JAUTO = 0 afterwards.
+ */
+void Ut_Adc_PeriphInit_PreviousAutoInjected_TrigAutoCleared( void )
+{
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_PeriphConfig( ADC_TRANSFER_MODE_POLL, 0u );
+
+    periphConfig.InjChannelsCnt    = 1u;
+    periphConfig.InjTriggerId      = ADC_INJ_TRIGGER_AUTO;
+    periphConfig.InjTriggerMode    = ADC_INJ_TRIGGER_MODE_CONTINUOUS;
+    periphConfig.InjChannels[ 0u ] = periphConfig.RegChannels[ 0u ];
+
+    Ut_Adc_PeriphInit( &periphConfig );
+    TEST_ASSERT_EQUAL_HEX32( LL_ADC_INJ_TRIG_FROM_GRP_REGULAR, LL_ADC_INJ_GetTrigAuto( UT_ADC_REG ) );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Deinit( UT_ADC_PERIPH ) );
+
+    /* Regular group only */
+    periphConfig.InjChannelsCnt = 0u;
+    periphConfig.InjTriggerId   = ADC_INJ_TRIGGER_SOFTWARE;
+
+    Ut_Adc_PeriphInit( &periphConfig );
+    TEST_ASSERT_EQUAL_HEX32( LL_ADC_INJ_TRIG_INDEPENDENT, LL_ADC_INJ_GetTrigAuto( UT_ADC_REG ) );
 }
 
 
@@ -1141,6 +1269,51 @@ void Ut_Adc_Set_SamplingTime_InternalChannelTooShort_ReturnsError( void )
 
 
 /**
+ * \brief   Adc_Set_ChannelInput() connects the output of OPAMP1 to its ADC channel.
+ *
+ * \details Selects the OPAMP1 input on its channel (ADC3 channel 10, on STM32H503 ADC1 channel 7), reads it back, then
+ *          tries another channel of the same peripheral and ADC1 (no OPAMP1 output on ADC1 of the H5E / H5F lines).
+ *
+ * \par Expected results
+ * - The right channel: ADC_REQUEST_OK, the input reads back OPAMP1, the channel is single-ended, no internal path of
+ *   the common block is enabled and no GPIO is configured (Gpio mock without expectation).
+ * - Another channel of the same peripheral: ADC_REQUEST_ERROR.
+ * - Ignored on MCUs without the amplifier (the test function exists always, the runner collects test functions
+ *   without preprocessor).
+ */
+void Ut_Adc_Set_ChannelInput_Opamp1_ConnectedWithoutPath( void )
+{
+#if !defined(OPAMP1)
+    TEST_IGNORE_MESSAGE( "MCU without OPAMP1" );
+#else
+#if defined(STM32H503xx)
+    const adc_PeriphId_t  periphId  = ADC_PERIPH_1;
+    const adc_ChannelId_t channelId = ADC_CHANNEL_7;
+    ADC_TypeDef * const   periphReg = ADC1;
+#else
+    const adc_PeriphId_t  periphId  = ADC_PERIPH_3;
+    const adc_ChannelId_t channelId = ADC_CHANNEL_10;
+    ADC_TypeDef * const   periphReg = ADC3;
+#endif /* STM32H503xx */
+    ADC_Common_TypeDef * const commonReg = __LL_ADC_COMMON_INSTANCE( periphReg );
+    adc_ChannelInput_t         input     = ADC_CHANNEL_INPUT_CNT;
+    const uint32_t             llChannel = __LL_ADC_DECIMAL_NB_TO_CHANNEL( channelId );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_ChannelInput( periphId, channelId, ADC_CHANNEL_INPUT_OPAMP1 ) );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_ChannelInput( periphId, channelId, &input ) );
+    TEST_ASSERT_EQUAL( ADC_CHANNEL_INPUT_OPAMP1, input );
+    TEST_ASSERT_EQUAL_HEX32( 0u, LL_ADC_GetChannelSingleDiff( periphReg, llChannel ) );
+    TEST_ASSERT_EQUAL_HEX32( 0u, LL_ADC_GetCommonPathInternalCh( commonReg ) );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Set_ChannelInput( periphId, ADC_CHANNEL_5, ADC_CHANNEL_INPUT_OPAMP1 ) );
+#if !defined(STM32H503xx)
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Set_ChannelInput( ADC_PERIPH_1, channelId, ADC_CHANNEL_INPUT_OPAMP1 ) );
+#endif /* STM32H503xx */
+#endif /* OPAMP1 */
+}
+
+
+/**
  * \brief   Adc_ChannelInit() is rejected for enabled ADC and NULL configuration.
  *
  * \details Presets ADEN and initializes pin channel 3, then calls the function
@@ -1250,6 +1423,89 @@ void Ut_Adc_Set_TriggerMode_SingleContinuous_RegisterAndReadBack( void )
     TEST_ASSERT_EQUAL_HEX32( LL_ADC_REG_CONV_SINGLE, LL_ADC_REG_GetContinuousMode( UT_ADC_REG ) );
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_TriggerMode( UT_ADC_PERIPH, &triggerMode ) );
     TEST_ASSERT_EQUAL( ADC_REG_TRIGGER_MODE_SINGLE, triggerMode );
+}
+
+
+/**
+ * \brief   Adc_Set_TriggerMode() selects the regular discontinuous modes.
+ *
+ * \details Sets every discontinuous mode (1 - 8 ranks per trigger), then continuous mode and
+ *          discontinuous mode with 3 ranks, then single mode. CFGR is compared with the bit
+ *          positions of RM0481 Rev 5 28.6.4 (CONT bit 13, DISCEN bit 16, DISCNUM[2:0] bits 19:17).
+ * \note    Task AB#221: the regular discontinuous mode was not available.
+ *
+ * \par Expected results
+ * - The enumeration has 8 discontinuous modes after the continuous mode.
+ * - Discontinuous mode with n ranks: DISCEN = 1, DISCNUM = n - 1, CONT = 0, Adc_Get_TriggerMode()
+ *   reads the mode back.
+ * - Continuous mode: CONT = 1, DISCEN = 0, DISCNUM = 0.
+ * - Discontinuous mode with 3 ranks after continuous mode: CONT = 0, DISCEN = 1, DISCNUM = 2.
+ * - Single mode: CONT = DISCEN = DISCNUM = 0.
+ */
+void Ut_Adc_Set_TriggerMode_Discontinuous_RegisterAndReadBack( void )
+{
+    adc_RegTriggerMode_t triggerMode = ADC_REG_TRIGGER_MODE_CNT;
+
+    TEST_ASSERT_EQUAL( ADC_REG_TRIGGER_MODE_CNT, ADC_REG_TRIGGER_MODE_DISCONT_1RANK + UT_ADC_DISCONT_MODE_CNT );
+    TEST_ASSERT_EQUAL( ADC_REG_TRIGGER_MODE_CONTINUOUS + 1u, ADC_REG_TRIGGER_MODE_DISCONT_1RANK );
+
+    for( uint32_t modeIdx = 0u; UT_ADC_DISCONT_MODE_CNT > modeIdx; modeIdx++ )
+    {
+        const adc_RegTriggerMode_t mode    = (adc_RegTriggerMode_t)( ADC_REG_TRIGGER_MODE_DISCONT_1RANK + modeIdx );
+        const uint32_t             rankCnt = modeIdx + 1u;
+
+        TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_TriggerMode( UT_ADC_PERIPH, mode ) );
+        TEST_ASSERT_EQUAL_HEX32( UT_ADC_CFGR_DISCONT( rankCnt ), UT_ADC_REG->CFGR & UT_ADC_CFGR_MODE_BITS );
+        TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_TriggerMode( UT_ADC_PERIPH, &triggerMode ) );
+        TEST_ASSERT_EQUAL( mode, triggerMode );
+    }
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_TriggerMode( UT_ADC_PERIPH, ADC_REG_TRIGGER_MODE_CONTINUOUS ) );
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_CFGR_CONT, UT_ADC_REG->CFGR & UT_ADC_CFGR_MODE_BITS );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_TriggerMode( UT_ADC_PERIPH, &triggerMode ) );
+    TEST_ASSERT_EQUAL( ADC_REG_TRIGGER_MODE_CONTINUOUS, triggerMode );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_TriggerMode( UT_ADC_PERIPH, ADC_REG_TRIGGER_MODE_DISCONT_3RANKS ) );
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_CFGR_DISCONT( 3u ), UT_ADC_REG->CFGR & UT_ADC_CFGR_MODE_BITS );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_TriggerMode( UT_ADC_PERIPH, &triggerMode ) );
+    TEST_ASSERT_EQUAL( ADC_REG_TRIGGER_MODE_DISCONT_3RANKS, triggerMode );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_TriggerMode( UT_ADC_PERIPH, ADC_REG_TRIGGER_MODE_SINGLE ) );
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->CFGR & UT_ADC_CFGR_MODE_BITS );
+}
+
+
+/**
+ * \brief   Regular discontinuous mode is rejected together with the auto-injected mode.
+ *
+ * \details Presets auto-injected mode and continuous mode in CFGR (JAUTO = CONT = 1) and selects:
+ * - discontinuous mode with 2 ranks,
+ * - single mode.
+ * Then presets CONT = DISCEN = 1 (state forbidden by RM0481, never written by the module)
+ * and reads the conversion mode.
+ * \note    Task AB#221: RM0481 Rev 5 28.6.4 - DISCEN must be kept cleared when JAUTO is set.
+ *
+ * \par Expected results
+ * - Discontinuous mode: ADC_REQUEST_ERROR, CFGR unchanged.
+ * - Single mode: ADC_REQUEST_OK, CONT = 0, JAUTO kept.
+ * - CONT = DISCEN = 1: Adc_Get_TriggerMode() returns ADC_REQUEST_ERROR, output is not written.
+ */
+void Ut_Adc_Set_TriggerMode_DiscontinuousAutoInjected_ReturnsErrorWithoutChange( void )
+{
+    adc_RegTriggerMode_t triggerMode = ADC_REG_TRIGGER_MODE_CNT;
+
+    UT_ADC_REG->CFGR = UT_ADC_CFGR_JAUTO | UT_ADC_CFGR_CONT;
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Set_TriggerMode( UT_ADC_PERIPH, ADC_REG_TRIGGER_MODE_DISCONT_2RANKS ) );
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_CFGR_JAUTO | UT_ADC_CFGR_CONT, UT_ADC_REG->CFGR );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_TriggerMode( UT_ADC_PERIPH, ADC_REG_TRIGGER_MODE_SINGLE ) );
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_CFGR_JAUTO, UT_ADC_REG->CFGR );
+
+    UT_ADC_REG->CFGR = UT_ADC_CFGR_CONT | UT_ADC_CFGR_DISCEN;
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Get_TriggerMode( UT_ADC_PERIPH, &triggerMode ) );
+    TEST_ASSERT_EQUAL( ADC_REG_TRIGGER_MODE_CNT, triggerMode );
 }
 
 /* ========================= CONVERSION START / STOP ======================== */
@@ -1536,6 +1792,64 @@ void Ut_Adc_Isr_OverrunAndDisabledSources_HandledByEnableMask( void )
     TEST_ASSERT_EQUAL_HEX16( 0u, utAdc_Buffer[ 0u ] );
 }
 
+
+/**
+ * \brief   ISR transfer mode of ADC3 - ADC3 interrupt registered in NVIC, data stored by its ISR.
+ *
+ * \note    Task AB#224: ISR transfer mode was rejected for ADC3 (ADC3 interrupt was marked as
+ *          not available in the module).
+ *
+ * \details Initializes ADC3 in ISR mode with buffer of 2 samples, starts conversion and
+ *          calls captured ISR twice with EOC flag of ADC3 (ADC3 DR = 0x123, 0x456).
+ *
+ * \par Expected results
+ * - ADC_REQUEST_OK, handler registered for NVIC_PERIPH_IRQ_ADC3, its priority UT_ADC_PRIO
+ *   set and the interrupt activated.
+ * - EOC and OVR interrupts of ADC3 enabled by start, ADC1 interrupts not enabled.
+ * - Buffer = { 0x123, 0x456 }, half and complete callback called once, EOC and OVR
+ *   interrupts of ADC3 disabled after the one-shot transfer.
+ * - Ignored on MCUs without ADC3 (test function exists always, the runner collects
+ *   test functions without preprocessor).
+ */
+void Ut_Adc_Isr_Adc3Transfer_Adc3InterruptRegisteredAndDataStored( void )
+{
+#if !defined(ADC3)
+    TEST_IGNORE_MESSAGE( "MCU without ADC3" );
+#else
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_PeriphConfig( ADC_TRANSFER_MODE_ISR, 2u );
+
+    periphConfig.PeriphId = ADC_PERIPH_3;
+    utAdc_NvicIrq         = NVIC_PERIPH_IRQ_ADC3;
+
+    Ut_Adc_Ignore_PeriphMocks();
+    Ut_Adc_Set_ModelActive();
+    Nvic_Set_PeriphIrq_Prio_StopIgnore();
+    Nvic_Set_PeriphIrq_Active_StopIgnore();
+    Nvic_Set_PeriphIrq_Prio_ExpectAndReturn( NVIC_PERIPH_IRQ_ADC3, UT_ADC_PRIO, NVIC_REQUEST_OK );
+    Nvic_Set_PeriphIrq_Active_ExpectAndReturn( NVIC_PERIPH_IRQ_ADC3, NVIC_REQUEST_OK );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_PeriphInit( &periphConfig ) );
+    TEST_ASSERT_NOT_NULL( utAdc_Isr );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( ADC_PERIPH_3 ) );
+    TEST_ASSERT_EQUAL_HEX32( LL_ADC_IT_EOC | LL_ADC_IT_OVR, ADC3->IER );
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->IER );
+
+    ADC3->DR  = 0x123u;
+    ADC3->ISR = ADC_ISR_EOC;
+    utAdc_Isr();
+    ADC3->DR  = 0x456u;
+    ADC3->ISR = ADC_ISR_EOC;
+    utAdc_Isr();
+
+    TEST_ASSERT_EQUAL_HEX16( 0x123u, utAdc_Buffer[ 0u ] );
+    TEST_ASSERT_EQUAL_HEX16( 0x456u, utAdc_Buffer[ 1u ] );
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_HalfCnt );
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL_HEX32( 0u, ADC3->IER & ( LL_ADC_IT_EOC | LL_ADC_IT_OVR ) );
+#endif
+}
+
 /* ============================ DATA HANDLING =============================== */
 
 /**
@@ -1746,7 +2060,7 @@ void Ut_Adc_Set_AwdThresholds_Resolution_ConvertedToRegisterFormat( void )
  *
  * \details Calls:
  * - AWD2 with "all regular" mode (AWD2/3 do not distinguish groups),
- * - AWD1 with single channel mode (no channel selector),
+ * - AWD1 with single channel mode without initialized peripheral (channel not converted),
  * - invalid AWD and NULL configuration,
  * - AWD2 filter 2 / no filter and AWD2 filter read,
  * - AWD1 threshold and filter change during conversion.
@@ -1764,9 +2078,10 @@ void Ut_Adc_AwdInit_UnsupportedModes_ReturnsError( void )
     /* AWD2 / AWD3 do not distinguish groups */
     TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
 
-    /* Single channel modes have no channel selector */
-    awdConfig.AwdId   = ADC_AWD_1;
-    awdConfig.AwdMode = ADC_AWD_MODE_SINGLE;
+    /* Single channel mode - no channel is converted (peripheral not initialized) */
+    awdConfig.AwdId        = ADC_AWD_1;
+    awdConfig.AwdMode      = ADC_AWD_MODE_SINGLE;
+    awdConfig.AwdChannelId = UT_ADC_VREF_CHANNEL;
     TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
 
     awdConfig.AwdId = ADC_AWD_CNT;
@@ -1783,6 +2098,200 @@ void Ut_Adc_AwdInit_UnsupportedModes_ReturnsError( void )
     UT_ADC_REG->CR = ADC_CR_ADSTART;
     TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Set_AwdThresholds( UT_ADC_PERIPH, ADC_AWD_1, 1u, 2u ) );
     TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Set_AwdFilter( UT_ADC_PERIPH, ADC_AWD_1, ADC_AWD_FILTER_2 ) );
+}
+
+
+/**
+ * \brief   Adc_AwdInit() configures analog watch-dog 1 on one channel.
+ *
+ * \details Initializes ADC1 with regular VREF channel 17 and injected temperature sensor channel 16,
+ *          then initializes AWD1 (thresholds 100 - 3000) in the modes:
+ *          single regular channel 17, single injected channel 16, single channel 16 (both groups),
+ *          all regular channels.
+ *          CFGR is compared with the bit positions of RM0481 Rev 5 28.6.4.
+ * \note    Task AB#220: the single channel modes were rejected (no channel in adc_AwdConfig_t).
+ *
+ * \par Expected results
+ * - Single regular 17:  AWD1CH = 17, AWD1SGL = 1, AWD1EN = 1, JAWD1EN = 0.
+ * - Single injected 16: AWD1CH = 16, AWD1SGL = 1, AWD1EN = 0, JAWD1EN = 1.
+ * - Single 16:          AWD1CH = 16, AWD1SGL = 1, AWD1EN = 1, JAWD1EN = 1.
+ * - All regular:        AWD1CH = 0,  AWD1SGL = 0, AWD1EN = 1, JAWD1EN = 0.
+ * - ADC_REQUEST_OK in all cases, thresholds read back 100 / 3000.
+ */
+void Ut_Adc_AwdInit_Awd1SingleChannel_ChannelAndGroupSelected( void )
+{
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_PeriphConfig( ADC_TRANSFER_MODE_POLL, 0u );
+    adc_AwdConfig_t    awdConfig    = { .AwdId = ADC_AWD_1, .AwdMode = ADC_AWD_MODE_SINGLE_REGULAR, .AwdChannelId = UT_ADC_VREF_CHANNEL,
+                                        .AwdChannelMask = ADC_AWD_CHANNEL_MASK_NONE, .AwdLowThreshold = 100u, .AwdHighThreshold = 3000u,
+                                        .AwdFilter = ADC_AWD_FILTER_NONE };
+    adc_AwdThreshold_t low          = 0u;
+    adc_AwdThreshold_t high         = 0u;
+
+    periphConfig.InjChannelsCnt = 1u;
+    periphConfig.InjChannels[ 0u ].ChannelId       = UT_ADC_TEMP_CHANNEL;
+    periphConfig.InjChannels[ 0u ].ChannelInput    = ADC_CHANNEL_INPUT_TEMP;
+    periphConfig.InjChannels[ 0u ].ChannelSampling = ADC_CHANNEL_SAMPLING_640_5_CYCLES;
+
+    Ut_Adc_PeriphInit( &periphConfig );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_CFGR_AWD1_SINGLE( 17u, UT_ADC_CFGR_AWD1EN ), UT_ADC_REG->CFGR & UT_ADC_CFGR_AWD1_BITS );
+
+    awdConfig.AwdMode      = ADC_AWD_MODE_SINGLE_INJECTED;
+    awdConfig.AwdChannelId = UT_ADC_TEMP_CHANNEL;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_CFGR_AWD1_SINGLE( 16u, UT_ADC_CFGR_JAWD1EN ), UT_ADC_REG->CFGR & UT_ADC_CFGR_AWD1_BITS );
+
+    awdConfig.AwdMode = ADC_AWD_MODE_SINGLE;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_CFGR_AWD1_SINGLE( 16u, UT_ADC_CFGR_AWD1EN | UT_ADC_CFGR_JAWD1EN ), UT_ADC_REG->CFGR & UT_ADC_CFGR_AWD1_BITS );
+
+    awdConfig.AwdMode = ADC_AWD_MODE_ALL_REGULAR;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_CFGR_AWD1EN, UT_ADC_REG->CFGR & UT_ADC_CFGR_AWD1_BITS );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_AwdThresholds( UT_ADC_PERIPH, ADC_AWD_1, &low, &high ) );
+    TEST_ASSERT_EQUAL_UINT16( 100u, low );
+    TEST_ASSERT_EQUAL_UINT16( 3000u, high );
+}
+
+
+/**
+ * \brief   Adc_AwdInit() configures analog watch-dog 2 / 3 on a channel set.
+ *
+ * \details Checks the channel set constants, initializes ADC1 with regular sequence VREF
+ *          (channel 17) and temperature sensor (channel 16), then initializes in single mode
+ *          AWD2 with channels 16 and 17 and AWD3 with channel 17, then AWD2 in mode all channels.
+ *          AWD2CR / AWD3CR are compared with RM0481 Rev 5 28.6.19 / 28.6.20 (bit n = channel n).
+ * \note    Task AB#220: the channel set of AWD2 / AWD3 was not configurable, the channel list
+ *          was an enumeration of bit masks.
+ *
+ * \par Expected results
+ * - ADC_AWD_CHANNEL_MASK_n is bit n (n = 0 - 19), ADC_AWD_CHANNEL_MASK_ALL is 0x000FFFFF,
+ *   ADC_AWD_CHANNEL_MASK_NONE is 0.
+ * - AWD2CR = bits 16 and 17, AWD3CR = bit 17, CFGR AWD1 selection unchanged (0).
+ * - AWD2 all channels: AWD2CR = 0x000FFFFF.
+ */
+void Ut_Adc_AwdInit_Awd23ChannelMask_ChannelsSelected( void )
+{
+    const adc_AwdChannelMask_t channelMasks[ UT_ADC_AWD_CHANNEL_CNT ] =
+    {
+        ADC_AWD_CHANNEL_MASK_0,  ADC_AWD_CHANNEL_MASK_1,  ADC_AWD_CHANNEL_MASK_2,  ADC_AWD_CHANNEL_MASK_3,
+        ADC_AWD_CHANNEL_MASK_4,  ADC_AWD_CHANNEL_MASK_5,  ADC_AWD_CHANNEL_MASK_6,  ADC_AWD_CHANNEL_MASK_7,
+        ADC_AWD_CHANNEL_MASK_8,  ADC_AWD_CHANNEL_MASK_9,  ADC_AWD_CHANNEL_MASK_10, ADC_AWD_CHANNEL_MASK_11,
+        ADC_AWD_CHANNEL_MASK_12, ADC_AWD_CHANNEL_MASK_13, ADC_AWD_CHANNEL_MASK_14, ADC_AWD_CHANNEL_MASK_15,
+        ADC_AWD_CHANNEL_MASK_16, ADC_AWD_CHANNEL_MASK_17, ADC_AWD_CHANNEL_MASK_18, ADC_AWD_CHANNEL_MASK_19,
+    };
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_PeriphConfig( ADC_TRANSFER_MODE_POLL, 0u );
+    adc_AwdConfig_t    awdConfig    = { .AwdId = ADC_AWD_2, .AwdMode = ADC_AWD_MODE_SINGLE, .AwdChannelId = ADC_CHANNEL_0,
+                                        .AwdChannelMask = ADC_AWD_CHANNEL_MASK_16 | ADC_AWD_CHANNEL_MASK_17,
+                                        .AwdLowThreshold = 160u, .AwdHighThreshold = 3200u, .AwdFilter = ADC_AWD_FILTER_NONE };
+
+    for( uint32_t channelIdx = 0u; UT_ADC_AWD_CHANNEL_CNT > channelIdx; channelIdx++ )
+    {
+        TEST_ASSERT_EQUAL_HEX32( 1uL << channelIdx, channelMasks[ channelIdx ] );
+    }
+
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_AWDCR_ALL_CHANNELS, ADC_AWD_CHANNEL_MASK_ALL );
+    TEST_ASSERT_EQUAL_HEX32( 0u, ADC_AWD_CHANNEL_MASK_NONE );
+
+    periphConfig.RegChannelsCnt = 2u;
+    periphConfig.RegChannels[ 1u ].ChannelId       = UT_ADC_TEMP_CHANNEL;
+    periphConfig.RegChannels[ 1u ].ChannelInput    = ADC_CHANNEL_INPUT_TEMP;
+    periphConfig.RegChannels[ 1u ].ChannelSampling = ADC_CHANNEL_SAMPLING_640_5_CYCLES;
+
+    Ut_Adc_PeriphInit( &periphConfig );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
+    TEST_ASSERT_EQUAL_HEX32( ( 1uL << 16u ) | ( 1uL << 17u ), UT_ADC_REG->AWD2CR );
+
+    awdConfig.AwdId          = ADC_AWD_3;
+    awdConfig.AwdChannelMask = ADC_AWD_CHANNEL_MASK_17;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
+    TEST_ASSERT_EQUAL_HEX32( 1uL << 17u, UT_ADC_REG->AWD3CR );
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->CFGR & UT_ADC_CFGR_AWD1_BITS );
+
+    awdConfig.AwdId   = ADC_AWD_2;
+    awdConfig.AwdMode = ADC_AWD_MODE_ALL;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
+    TEST_ASSERT_EQUAL_HEX32( UT_ADC_AWDCR_ALL_CHANNELS, UT_ADC_REG->AWD2CR );
+}
+
+
+/**
+ * \brief   Adc_AwdInit() rejects monitored channels which are not converted.
+ *
+ * \details Initializes ADC1 with the regular VREF channel 17 only and calls Adc_AwdInit() with:
+ * - AWD1 single channel 16 (not converted),
+ * - AWD1 single injected channel 17 (converted by the regular group only),
+ * - AWD1 single regular channel ADC_CHANNEL_CNT (invalid channel),
+ * - AWD1 invalid mode ADC_AWD_MODE_CNT,
+ * - AWD2 single mode with empty channel set, with channels 16 and 17 (16 not converted) and with
+ *   bit 20 (no channel 20),
+ * - AWD3 single regular mode with channel 17 (AWD3 does not distinguish groups),
+ * then deinitializes ADC1 and initializes AWD1 single channel 17.
+ * \note    Task AB#220: RM0481 Rev 5 28.6.4, 28.6.19, 28.6.20 - the channels selected by AWD1CH /
+ *          AWDxCH must be also selected into the SQi or JSQi bits.
+ *
+ * \par Expected results
+ * - ADC_REQUEST_ERROR in all cases.
+ * - CFGR AWD1 selection, AWD2CR, AWD3CR, TR1, TR2 and TR3 are not written (stay 0).
+ */
+void Ut_Adc_AwdInit_ChannelNotConverted_ReturnsErrorWithoutAccess( void )
+{
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_PeriphConfig( ADC_TRANSFER_MODE_POLL, 0u );
+    adc_AwdConfig_t    awdConfig    = { .AwdId = ADC_AWD_1, .AwdMode = ADC_AWD_MODE_SINGLE, .AwdChannelId = UT_ADC_TEMP_CHANNEL,
+                                        .AwdChannelMask = ADC_AWD_CHANNEL_MASK_NONE, .AwdLowThreshold = 100u, .AwdHighThreshold = 3000u,
+                                        .AwdFilter = ADC_AWD_FILTER_NONE };
+
+    Ut_Adc_PeriphInit( &periphConfig );
+
+    /* Channel 16 is not converted */
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
+
+    /* Channel 17 is converted by the regular group only */
+    awdConfig.AwdMode      = ADC_AWD_MODE_SINGLE_INJECTED;
+    awdConfig.AwdChannelId = UT_ADC_VREF_CHANNEL;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
+
+    awdConfig.AwdMode      = ADC_AWD_MODE_SINGLE_REGULAR;
+    awdConfig.AwdChannelId = ADC_CHANNEL_CNT;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
+
+    awdConfig.AwdMode      = ADC_AWD_MODE_CNT;
+    awdConfig.AwdChannelId = UT_ADC_VREF_CHANNEL;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
+
+    /* AWD2 channel set: empty, channel 16 not converted, no channel 20 */
+    awdConfig.AwdId          = ADC_AWD_2;
+    awdConfig.AwdMode        = ADC_AWD_MODE_SINGLE;
+    awdConfig.AwdChannelMask = ADC_AWD_CHANNEL_MASK_NONE;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
+
+    awdConfig.AwdChannelMask = ADC_AWD_CHANNEL_MASK_16 | ADC_AWD_CHANNEL_MASK_17;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
+
+    awdConfig.AwdChannelMask = ADC_AWD_CHANNEL_MASK_17 | ( ADC_AWD_CHANNEL_MASK_19 << 1u );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
+
+    /* AWD3 does not distinguish groups */
+    awdConfig.AwdId          = ADC_AWD_3;
+    awdConfig.AwdMode        = ADC_AWD_MODE_SINGLE_REGULAR;
+    awdConfig.AwdChannelMask = ADC_AWD_CHANNEL_MASK_17;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
+
+    /* No channel is converted after deinitialization */
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Deinit( UT_ADC_PERIPH ) );
+    awdConfig.AwdId   = ADC_AWD_1;
+    awdConfig.AwdMode = ADC_AWD_MODE_SINGLE;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_AwdInit( UT_ADC_PERIPH, &awdConfig ) );
+
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->CFGR & UT_ADC_CFGR_AWD1_BITS );
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->AWD2CR );
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->AWD3CR );
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->TR1 );
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->TR2 );
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->TR3 );
 }
 
 /* ----------------------------- DMA mode ----------------------------------- */
@@ -2230,6 +2739,71 @@ void Ut_Adc_Dma_GpdmaErrors_ReportedToUser( void )
 
 
 /**
+ * \brief   DMA transfer mode of ADC3 - GPDMA request ADC3 and the GPDMA handlers of ADC3 are used.
+ *
+ * \note    Task AB#224: DMA transfer mode was rejected for ADC3 (ADC3 request was not available
+ *          in the GPDMA module, Task AB#229).
+ *
+ * \details Initializes ADC3 in DMA mode (one shot buffer of 4 samples, half transfer callback),
+ *          starts the conversion and calls the half transfer, error and transfer complete
+ *          handlers captured from Gpdma_Init().
+ *
+ * \par Expected results
+ * - Gpdma_Init() 1x: request GPDMA_REQ_ADC3, source ADC3 DR, destination the data buffer,
+ *   transfer complete / half transfer / error handlers registered; ADC3 interrupt registered
+ *   in NVIC; ADC3 DMA requests limited (DMNGT = one shot).
+ * - Start: ADC3 conversion started, only the overrun interrupt of ADC3 enabled.
+ * - Half transfer handler: half callback 1x. Error handler (transfer error): error callback 1x
+ *   with ADC_ERROR_DMA_TRANSFER. Transfer complete handler: complete callback 1x, ADC3
+ *   conversion stopped.
+ * - ADC1 is not touched (CR = 0).
+ * - Ignored on MCUs without ADC3 (test function exists always, the runner collects
+ *   test functions without preprocessor).
+ */
+void Ut_Adc_Dma_Adc3Transfer_Adc3RequestAndHandlersConnected( void )
+{
+#if !defined(ADC3)
+    TEST_IGNORE_MESSAGE( "MCU without ADC3" );
+#else
+    adc_PeriphConfig_t periphConfig = Ut_Adc_Get_DmaPeriphConfig();
+
+    periphConfig.PeriphId = ADC_PERIPH_3;
+    utAdc_NvicIrq         = NVIC_PERIPH_IRQ_ADC3;
+
+    Ut_Adc_Setup_DmaMocks();
+    Ut_Adc_PeriphInit( &periphConfig );
+
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_DmaInitCnt );
+    TEST_ASSERT_EQUAL( GPDMA_REQ_ADC3, utAdc_DmaXferConfig[ 0u ].RequestSource );
+    TEST_ASSERT_EQUAL_HEX32( (uint32_t)(uintptr_t)&ADC3->DR, utAdc_DmaXferConfig[ 0u ].SourceAddr );
+    TEST_ASSERT_EQUAL_HEX32( (uint32_t)(uintptr_t)utAdc_Buffer, utAdc_DmaXferConfig[ 0u ].DestinationAddr );
+    TEST_ASSERT_NOT_NULL( utAdc_DmaConfig[ 0u ].TransferCompleteIsr );
+    TEST_ASSERT_NOT_NULL( utAdc_DmaConfig[ 0u ].HalfTransferIsr );
+    TEST_ASSERT_NOT_NULL( utAdc_DmaConfig[ 0u ].ErrorIsr );
+    TEST_ASSERT_NOT_NULL( utAdc_Isr );
+    TEST_ASSERT_EQUAL_HEX32( LL_ADC_REG_DMA_TRANSFER_LIMITED, LL_ADC_REG_GetDMATransfer( ADC3 ) );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( ADC_PERIPH_3 ) );
+    TEST_ASSERT_EQUAL_HEX32( ADC_CR_ADSTART, ADC3->CR & ADC_CR_ADSTART );
+    TEST_ASSERT_EQUAL_HEX32( LL_ADC_IT_OVR, ADC3->IER & ( LL_ADC_IT_EOC | LL_ADC_IT_OVR ) );
+
+    utAdc_DmaConfig[ 0u ].HalfTransferIsr();
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_HalfCnt );
+
+    utAdc_DmaConfig[ 0u ].ErrorIsr( GPDMA_ERROR_TRANSFER );
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_ErrorCnt );
+    TEST_ASSERT_EQUAL( ADC_ERROR_DMA_TRANSFER, utAdc_LastError );
+
+    utAdc_DmaConfig[ 0u ].TransferCompleteIsr();
+    TEST_ASSERT_EQUAL_UINT32( 1u, utAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL_HEX32( 0u, ADC3->CR & ADC_CR_ADSTART );
+
+    TEST_ASSERT_EQUAL_HEX32( 0u, UT_ADC_REG->CR );
+#endif
+}
+
+
+/**
  * \brief   Stopping a running DMA transfer disables the channel and the overrun interrupt.
  *
  * \details Starts a DMA transfer and stops it by Adc_Set_RegStop().
@@ -2351,49 +2925,53 @@ void Ut_Adc_Deinit_DmaChannelStopError_ReturnsError( void )
 /* ========================== LOCAL FUNCTIONS =============================== */
 
 /**
- * \brief HW model of ADC1 - runs in background thread.
+ * \brief HW model of all ADC peripherals - runs in background thread.
  *
  * Calibration ends immediately, disable request clears ADEN, stop requests clear
  * the conversion start bits.
  */
 static void Ut_Adc_HwModel( void )
 {
-    const uint32_t cr = UT_ADC_REG->CR;
+    for( uint32_t regIdx = 0u; ( sizeof( utAdc_ModelReg ) / sizeof( utAdc_ModelReg[ 0u ] ) ) > regIdx; regIdx++ )
+    {
+        ADC_TypeDef * const adcReg = utAdc_ModelReg[ regIdx ];
+        const uint32_t      cr     = adcReg->CR;
 
-    if( 0u != ( cr & ADC_CR_ADCAL ) )
-    {
-        (void)__atomic_and_fetch( &UT_ADC_REG->CR, ~ADC_CR_ADCAL, __ATOMIC_SEQ_CST );
-    }
-    else
-    {
-        /* Calibration not requested */
-    }
+        if( 0u != ( cr & ADC_CR_ADCAL ) )
+        {
+            (void)__atomic_and_fetch( &adcReg->CR, ~ADC_CR_ADCAL, __ATOMIC_SEQ_CST );
+        }
+        else
+        {
+            /* Calibration not requested */
+        }
 
-    if( 0u != ( cr & ADC_CR_ADDIS ) )
-    {
-        (void)__atomic_and_fetch( &UT_ADC_REG->CR, ~( ADC_CR_ADDIS | ADC_CR_ADEN ), __ATOMIC_SEQ_CST );
-    }
-    else
-    {
-        /* Disable not requested */
-    }
+        if( 0u != ( cr & ADC_CR_ADDIS ) )
+        {
+            (void)__atomic_and_fetch( &adcReg->CR, ~( ADC_CR_ADDIS | ADC_CR_ADEN ), __ATOMIC_SEQ_CST );
+        }
+        else
+        {
+            /* Disable not requested */
+        }
 
-    if( 0u != ( cr & ADC_CR_ADSTP ) )
-    {
-        (void)__atomic_and_fetch( &UT_ADC_REG->CR, ~( ADC_CR_ADSTP | ADC_CR_ADSTART ), __ATOMIC_SEQ_CST );
-    }
-    else
-    {
-        /* Regular stop not requested */
-    }
+        if( 0u != ( cr & ADC_CR_ADSTP ) )
+        {
+            (void)__atomic_and_fetch( &adcReg->CR, ~( ADC_CR_ADSTP | ADC_CR_ADSTART ), __ATOMIC_SEQ_CST );
+        }
+        else
+        {
+            /* Regular stop not requested */
+        }
 
-    if( 0u != ( cr & ADC_CR_JADSTP ) )
-    {
-        (void)__atomic_and_fetch( &UT_ADC_REG->CR, ~( ADC_CR_JADSTP | ADC_CR_JADSTART ), __ATOMIC_SEQ_CST );
-    }
-    else
-    {
-        /* Injected stop not requested */
+        if( 0u != ( cr & ADC_CR_JADSTP ) )
+        {
+            (void)__atomic_and_fetch( &adcReg->CR, ~( ADC_CR_JADSTP | ADC_CR_JADSTART ), __ATOMIC_SEQ_CST );
+        }
+        else
+        {
+            /* Injected stop not requested */
+        }
     }
 }
 
@@ -2456,13 +3034,13 @@ static gpio_RequestState_t Ut_Adc_GpioInitStub( gpio_Config_t *gpioConfig, int c
 
 
 /**
- * \brief NVIC handler registration stub - stores ISR of the ADC.
+ * \brief NVIC handler registration stub - stores ISR of the ADC (interrupt \ref utAdc_NvicIrq expected).
  */
 static nvic_RequestState_t Ut_Adc_NvicSetHandlerStub( nvic_PeriphIrqList_t irqId, const nvic_IsrCallback_t irqHandler, int callCnt )
 {
     (void)callCnt;
 
-    TEST_ASSERT_EQUAL( UT_ADC_NVIC, irqId );
+    TEST_ASSERT_EQUAL( utAdc_NvicIrq, irqId );
     TEST_ASSERT_NOT_NULL( irqHandler );
 
     utAdc_Isr = irqHandler;
@@ -2515,6 +3093,9 @@ static void Ut_Adc_Release( void )
     Gpdma_Set_InterruptInactive_IgnoreAndReturn( GPDMA_REQUEST_OK );
 
     (void)Adc_Deinit( UT_ADC_PERIPH );
+#if defined (ADC3)
+    (void)Adc_Deinit( ADC_PERIPH_3 );
+#endif /* ADC3 */
     (void)Adc_Set_ClockSource( ADC_CLK_SRC_HCLK );
 
     Ut_Adc_Reset_Mocks();
