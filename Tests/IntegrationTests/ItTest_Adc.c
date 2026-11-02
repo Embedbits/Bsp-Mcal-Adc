@@ -17,13 +17,25 @@
  *   as on the other families, the test does not depend on the system memory
  *   access.
  * - temperature sensor (channel 19) - sensor voltage within plausible range
+ * The shared interrupt test (MCUs with ADC2) converts the pin PC0 (ADC2 channel 1),
+ * the value is not checked.
+ *
+ * Divider tests: two resistor dividers from +3V3 (= VDDA of the board) to GND on
+ * external channels of ADC1 - PA0 (channel 5): 10 kOhm to +3V3 / 4.7 kOhm to GND,
+ * PC0 (channel 1): 4.7 kOhm to +3V3 / 10 kOhm to GND. The ratio of the conversion
+ * result to the full scale equals the divider ratio (independent of VDDA). Fixture
+ * of the board (EmBi_Platform IntegrationTesting, "Board fixtures"): feature
+ * ADC_DIVIDERS - the divider tests are ignored on a board with a fixture without it
+ * (a board without a fixture is expected to have the dividers of its board block) and
+ * on a board without known dividers (IT_ADC_DIV_AVAILABLE 0).
  *
  * STM32U5: ADC1 / ADC2 are 14-bit converters (12-bit resolution used by the
  * tests unless stated otherwise), the analog supply VDDA is validated by the
  * RCC module (PWR_SVMCR.ASV) when the ADC clock is activated, default system
  * clock of StartUp is 160 MHz (HCLK / 4 = 40 MHz ADC kernel clock).
  *
- * Used resources: ADC1, GPDMA1 channel 7 (DMA mode).
+ * Used resources: ADC1, ADC2 with pin PC0 (MCUs with ADC2), GPDMA1 channel 7
+ * (DMA mode).
  */
 
 /* ============================= INCLUDES =================================== */
@@ -34,27 +46,82 @@
 
 /* ======================= FORWARD DECLARATIONS ============================= */
 
-static void         It_Adc_Get_Config        ( adc_Config_t * const config, adc_TransferMode_t transferMode,
+static void         ItAdc_Get_Config        ( adc_Config_t * const config, adc_TransferMode_t transferMode,
                                               adc_BufferSize_t bufferSize, adc_BufferMode_t bufferMode,
                                               adc_RegTriggerMode_t triggerMode );
-static void         It_Adc_Add_RegChannel   ( adc_Config_t * const config, adc_ChannelId_t channelId, adc_ChannelInput_t channelInput );
-static void         It_Adc_Wait             ( volatile const uint32_t * const counter, uint32_t expectedCnt );
-static uint32_t     It_Adc_Get_Vdda_mV      ( adc_Data_t vrefRaw12 );
-static uint32_t     It_Adc_Get_Voltage_mV   ( adc_Data_t raw12, uint32_t vdda_mV );
+static void         ItAdc_Add_RegChannel   ( adc_Config_t * const config, adc_ChannelId_t channelId, adc_ChannelInput_t channelInput );
+static void         ItAdc_Wait             ( volatile const uint32_t * const counter, uint32_t expectedCnt );
+static void         ItAdc_Wait_Sample      ( uint32_t sampleIdx );
+static void         ItAdc_Poll             ( uint32_t loopCnt );
+static uint32_t     ItAdc_Get_Vdda_mV      ( adc_Data_t vrefRaw12 );
+static uint32_t     ItAdc_Get_Voltage_mV   ( adc_Data_t raw12, uint32_t vdda_mV );
 
-static void         It_Adc_HalfCallback     ( void );
-static void         It_Adc_CompleteCallback ( void );
-static void         It_Adc_InjCallback      ( void );
-static void         It_Adc_ErrorCallback    ( adc_ErrorId_t errorId );
+static void         ItAdc_HalfCallback     ( void );
+static void         ItAdc_CompleteCallback ( void );
+static void         ItAdc_InjCallback      ( void );
+static void         ItAdc_ErrorCallback    ( adc_ErrorId_t errorId );
+static void         ItAdc_RequireDividers  ( void );
+static void         ItAdc_Check_Divider    ( adc_Data_t raw12,
+                                              uint32_t topOhm,
+                                              uint32_t bottomOhm,
+                                              const char * const message );
 
 /* ========================= SYMBOLIC CONSTANTS ============================= */
+
+/*----------------------------- Board configuration --------------------------*/
+/* Boards are named by their MCU (IT_BOARD_<MCU>, name of the board from the detection) */
+#if defined(IT_BOARD_STM32U5A5xJ_SpiLoop)
+
+    /** NUCLEO-U5A5ZJ-Q: dividers on PA0 (ADC1 channel 5) and PC0 (ADC1 channel 1) */
+    #define IT_ADC_DIV_AVAILABLE            ( 1u )
+
+#elif defined(IT_BOARD_STM32U535xE) || \
+      defined(IT_BOARD_STM32U545xE) || \
+      defined(IT_BOARD_STM32U575xI) || \
+      defined(IT_BOARD_STM32U585xI) || \
+      defined(IT_BOARD_STM32U595xJ) || \
+      defined(IT_BOARD_STM32U599xJ) || \
+      defined(IT_BOARD_STM32U5A5xJ) || \
+      defined(IT_BOARD_STM32U5A9xJ)
+
+    /** No dividers known for the board (NUCLEO-U545RE-Q, NUCLEO-U575ZI-Q and the other STM32U5A5 board) */
+    #define IT_ADC_DIV_AVAILABLE            ( 0u )
+
+#else
+    #error "Board of Adc integration tests is not defined (INTEGRATION_TEST_BOARD)."
+#endif
 
 /** ADC peripheral under test */
 #define IT_ADC_PERIPH                       ( ADC_PERIPH_1 )
 
+/** External channels of the dividers: PA0 (ADC1_IN5) and PC0 (ADC1_IN1) */
+#define IT_ADC_CH_DIV_PA0                   ( ADC_CHANNEL_5 )
+#define IT_ADC_CH_DIV_PC0                   ( ADC_CHANNEL_1 )
+
+/** Resistors of the dividers [Ohm]: PA0 10k to +3V3 / 4.7k to GND, PC0 4.7k to +3V3 / 10k to GND */
+#define IT_ADC_DIV_R_10K                    ( 10000u )
+#define IT_ADC_DIV_R_4K7                    ( 4700u )
+
+/** Tolerance of the divider ratio [% of the expected result] (resistors 1 %, ADC offset / gain) */
+#define IT_ADC_DIV_TOL_PCT                  ( 3u )
+
+/** Tolerance of the divider voltage calculated with the typical VREFINT [% of the expected voltage] */
+#define IT_ADC_DIV_VOLT_TOL_PCT             ( 8u )
+
+/** Samples of the divider sequences: PA0, PC0 (+ VREFINT) */
+#define IT_ADC_DIV_SAMPLES                  ( 2u )
+#define IT_ADC_DIV_VREF_SAMPLES             ( 3u )
+
+/** Full scale of a 12-bit result [LSB] and count of percent in one unit */
+#define IT_ADC_FULL_SCALE_12BIT             ( 4095u )
+#define IT_ADC_PERCENT                      ( 100u )
+
 /** Internal channels of ADC1 */
 #define IT_ADC_CH_VREF                      ( ADC_CHANNEL_0 )
 #define IT_ADC_CH_TEMP                      ( ADC_CHANNEL_19 )
+
+/** Channel of ADC2 (pin PC0 - the value is not checked) */
+#define IT_ADC2_CH_PIN                      ( ADC_CHANNEL_1 )
 
 /** Sampling time satisfying minimum of internal channels (VREF 4 us, TEMP 5 us):
  *  814 cycles at 40 MHz = 20 us */
@@ -84,6 +151,16 @@ static void         It_Adc_ErrorCallback    ( adc_ErrorId_t errorId );
 /** Maximal count of wait loop iterations (Adc_Task called) */
 #define IT_ADC_WAIT_LOOPS                   ( 1000000u )
 
+/** Count of Adc_Task calls after a discontinuous subgroup - takes far longer than several conversions */
+#define IT_ADC_IDLE_LOOPS                   ( 20000u )
+
+/** Value of a data buffer item which was not written by the module */
+#define IT_ADC_BUF_EMPTY                    ( 0xFFFFu )
+
+/** Minimal difference of the VREFINT and the temperature sensor result for the analog watch-dog
+ *  window between them [LSB, 12-bit] - AWD2 / AWD3 compare the 8 MSB (16 LSB steps) */
+#define IT_ADC_AWD_MARGIN_LSB               ( 64u )
+
 /* ============================== MACROS ==================================== */
 
 /* ========================== LOCAL VARIABLES =============================== */
@@ -108,7 +185,7 @@ void setUp( void )
 
     for( uint32_t dataIdx = 0u; IT_ADC_BUF_SIZE > dataIdx; dataIdx++ )
     {
-        itAdc_Buffer[ dataIdx ] = 0xFFFFu;
+        itAdc_Buffer[ dataIdx ] = IT_ADC_BUF_EMPTY;
     }
 }
 
@@ -138,8 +215,8 @@ void It_Adc_Init_ClockConfiguration_ReadBack( void )
     adc_ClkSrc_t clkSrc = ADC_CLK_SRC_CNT;
     adc_ClkDiv_t clkDiv = ADC_CLK_DIV_CNT;
 
-    It_Adc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
-    It_Adc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
 
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_ClockSource( &clkSrc ) );
@@ -169,20 +246,20 @@ void It_Adc_Init_InvalidConfig_ReturnsError( void )
     TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Init( ADC_NULL_PTR ) );
 
     /* Sampling time below minimum of VREFINT */
-    It_Adc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
-    It_Adc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
     config.PeriphConfig[ IT_ADC_PERIPH ].RegChannels[ 0u ].ChannelSampling = ADC_CHANNEL_SAMPLING_5_CYCLES;
     TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Init( &config ) );
 
     /* Kernel clock above maximum (HCLK 160 MHz not divided) */
-    It_Adc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
-    It_Adc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
     config.ClockDivider = ADC_CLK_DIV_1;
     TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Init( &config ) );
 
     /* Internal signal on channel without the connection */
-    It_Adc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
-    It_Adc_Add_RegChannel( &config, ADC_CHANNEL_3, ADC_CHANNEL_INPUT_VREF );
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Add_RegChannel( &config, ADC_CHANNEL_3, ADC_CHANNEL_INPUT_VREF );
     TEST_ASSERT_EQUAL( ADC_REQUEST_ERROR, Adc_Init( &config ) );
 }
 
@@ -206,8 +283,8 @@ void It_Adc_Deinit_InitializedPeripheral_InitializationPossibleAgain( void )
 {
     adc_Config_t config;
 
-    It_Adc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
-    It_Adc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
 
     /* Peripheral is enabled - clock configuration is refused */
@@ -217,7 +294,7 @@ void It_Adc_Deinit_InitializedPeripheral_InitializationPossibleAgain( void )
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
 
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
-    It_Adc_Wait( &itAdc_CompleteCnt, 1u );
+    ItAdc_Wait( &itAdc_CompleteCnt, 1u );
     TEST_ASSERT_EQUAL_UINT32( 1u, itAdc_CompleteCnt );
 }
 
@@ -238,16 +315,16 @@ void It_Adc_Set_RegStart_VrefPoll_VddaMatchesBoardSupply( void )
 {
     adc_Config_t config;
 
-    It_Adc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
-    It_Adc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
 
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
-    It_Adc_Wait( &itAdc_CompleteCnt, 1u );
+    ItAdc_Wait( &itAdc_CompleteCnt, 1u );
 
     TEST_ASSERT_EQUAL_UINT32( 1u, itAdc_CompleteCnt );
     TEST_ASSERT_EQUAL_UINT32( 0u, itAdc_ErrorCnt );
-    TEST_ASSERT_UINT32_WITHIN( IT_ADC_VDDA_TOL_MV, IT_ADC_VDDA_MV, It_Adc_Get_Vdda_mV( itAdc_Buffer[ 0u ] ) );
+    TEST_ASSERT_UINT32_WITHIN( IT_ADC_VDDA_TOL_MV, IT_ADC_VDDA_MV, ItAdc_Get_Vdda_mV( itAdc_Buffer[ 0u ] ) );
 }
 
 
@@ -266,8 +343,8 @@ void It_Adc_Set_Resolution_8Bit_ResultScaled( void )
     adc_Config_t     config;
     adc_Resolution_t resolution = ADC_RESOLUTION_12BIT;
 
-    It_Adc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
-    It_Adc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
     config.PeriphConfig[ IT_ADC_PERIPH ].Resolution = ADC_RESOLUTION_8BIT;
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
 
@@ -275,10 +352,10 @@ void It_Adc_Set_Resolution_8Bit_ResultScaled( void )
     TEST_ASSERT_EQUAL( ADC_RESOLUTION_8BIT, resolution );
 
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
-    It_Adc_Wait( &itAdc_CompleteCnt, 1u );
+    ItAdc_Wait( &itAdc_CompleteCnt, 1u );
 
     TEST_ASSERT_LESS_THAN_UINT16( 256u, itAdc_Buffer[ 0u ] );
-    TEST_ASSERT_UINT32_WITHIN( 2u * IT_ADC_VDDA_TOL_MV, IT_ADC_VDDA_MV, It_Adc_Get_Vdda_mV( (adc_Data_t)( itAdc_Buffer[ 0u ] << 4u ) ) );
+    TEST_ASSERT_UINT32_WITHIN( 2u * IT_ADC_VDDA_TOL_MV, IT_ADC_VDDA_MV, ItAdc_Get_Vdda_mV( (adc_Data_t)( itAdc_Buffer[ 0u ] << 4u ) ) );
 }
 
 
@@ -298,8 +375,8 @@ void It_Adc_Set_Resolution_14Bit_ResultScaled( void )
     adc_Config_t     config;
     adc_Resolution_t resolution = ADC_RESOLUTION_12BIT;
 
-    It_Adc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
-    It_Adc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
     config.PeriphConfig[ IT_ADC_PERIPH ].Resolution = ADC_RESOLUTION_14BIT;
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
 
@@ -307,11 +384,11 @@ void It_Adc_Set_Resolution_14Bit_ResultScaled( void )
     TEST_ASSERT_EQUAL( ADC_RESOLUTION_14BIT, resolution );
 
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
-    It_Adc_Wait( &itAdc_CompleteCnt, 1u );
+    ItAdc_Wait( &itAdc_CompleteCnt, 1u );
 
     TEST_ASSERT_GREATER_OR_EQUAL_UINT16( 1024u, itAdc_Buffer[ 0u ] );
     TEST_ASSERT_LESS_THAN_UINT16( 16384u, itAdc_Buffer[ 0u ] );
-    TEST_ASSERT_UINT32_WITHIN( IT_ADC_VDDA_TOL_MV, IT_ADC_VDDA_MV, It_Adc_Get_Vdda_mV( (adc_Data_t)( itAdc_Buffer[ 0u ] >> 2u ) ) );
+    TEST_ASSERT_UINT32_WITHIN( IT_ADC_VDDA_TOL_MV, IT_ADC_VDDA_MV, ItAdc_Get_Vdda_mV( (adc_Data_t)( itAdc_Buffer[ 0u ] >> 2u ) ) );
 }
 
 
@@ -332,21 +409,64 @@ void It_Adc_Set_RegStart_VrefTempSequenceIsr_ValuesPlausible( void )
     adc_Config_t config;
     uint32_t     vdda_mV = 0u;
 
-    It_Adc_Get_Config( &config, ADC_TRANSFER_MODE_ISR, 2u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
-    It_Adc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
-    It_Adc_Add_RegChannel( &config, IT_ADC_CH_TEMP, ADC_CHANNEL_INPUT_TEMP );
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_ISR, 2u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_TEMP, ADC_CHANNEL_INPUT_TEMP );
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
 
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
-    It_Adc_Wait( &itAdc_CompleteCnt, 1u );
+    ItAdc_Wait( &itAdc_CompleteCnt, 1u );
 
     TEST_ASSERT_EQUAL_UINT32( 1u, itAdc_CompleteCnt );
     TEST_ASSERT_EQUAL_UINT32( 0u, itAdc_ErrorCnt );
 
-    vdda_mV = It_Adc_Get_Vdda_mV( itAdc_Buffer[ 0u ] );
+    vdda_mV = ItAdc_Get_Vdda_mV( itAdc_Buffer[ 0u ] );
     TEST_ASSERT_UINT32_WITHIN( IT_ADC_VDDA_TOL_MV, IT_ADC_VDDA_MV, vdda_mV );
     TEST_ASSERT_UINT32_WITHIN( ( IT_ADC_TEMP_MAX_MV - IT_ADC_TEMP_MIN_MV ) / 2u, ( IT_ADC_TEMP_MAX_MV + IT_ADC_TEMP_MIN_MV ) / 2u,
-                               It_Adc_Get_Voltage_mV( itAdc_Buffer[ 1u ], vdda_mV ) );
+                               ItAdc_Get_Voltage_mV( itAdc_Buffer[ 1u ], vdda_mV ) );
+}
+
+
+/**
+ * \brief   ADC1 and ADC2 share the ADC1_2 interrupt - deinitialization of ADC1 does not stop
+ *          the interrupt data transfer of ADC2.
+ *
+ * \details MCUs with ADC2: ADC1 (VREFINT) and ADC2 (channel 1, pin PC0 - not wired, the value
+ *          is not checked) are initialized in ISR mode, ADC1 is deinitialized, then a conversion
+ *          of ADC2 is started and the test waits for its transfer complete callback.
+ *
+ * \par Expected results
+ * - Adc_Init() and Adc_Deinit( ADC_PERIPH_1 ) return ADC_REQUEST_OK.
+ * - ADC2 transfer complete callback 1x (end of conversion interrupt served), no error callback.
+ * - Adc_Deinit( ADC_PERIPH_2 ) returns ADC_REQUEST_OK.
+ * - MCUs without ADC2: test ignored.
+ */
+void It_Adc_Deinit_Adc1SharedInterrupt_Adc2IsrTransferContinues( void )
+{
+#if defined(ADC2)
+    adc_Config_t               config;
+    adc_PeriphConfig_t * const adc2Config = &config.PeriphConfig[ ADC_PERIPH_2 ];
+
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_ISR, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+
+    adc2Config->RegChannels[ 0u ].ChannelId       = IT_ADC2_CH_PIN;
+    adc2Config->RegChannels[ 0u ].ChannelInput    = ADC_CHANNEL_INPUT_PIN_SINGLE;
+    adc2Config->RegChannels[ 0u ].ChannelSampling = IT_ADC_SAMPLING;
+    adc2Config->RegChannelsCnt                    = 1u;
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Deinit( ADC_PERIPH_1 ) );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( ADC_PERIPH_2 ) );
+    ItAdc_Wait( &itAdc_CompleteCnt, 1u );
+
+    TEST_ASSERT_EQUAL_UINT32( 1u, itAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL_UINT32( 0u, itAdc_ErrorCnt );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Deinit( ADC_PERIPH_2 ) );
+#else
+    TEST_IGNORE_MESSAGE( "MCU without ADC2" );
+#endif /* ADC2 */
 }
 
 
@@ -366,12 +486,12 @@ void It_Adc_Set_RegStart_ContinuousDmaCircular_HalfAndCompleteCallbacks( void )
 {
     adc_Config_t config;
 
-    It_Adc_Get_Config( &config, ADC_TRANSFER_MODE_DMA, IT_ADC_BUF_SIZE, ADC_BUFFER_MODE_CIRCULAR, ADC_REG_TRIGGER_MODE_CONTINUOUS );
-    It_Adc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_DMA, IT_ADC_BUF_SIZE, ADC_BUFFER_MODE_CIRCULAR, ADC_REG_TRIGGER_MODE_CONTINUOUS );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
 
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
-    It_Adc_Wait( &itAdc_CompleteCnt, 3u );
+    ItAdc_Wait( &itAdc_CompleteCnt, 3u );
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStop( IT_ADC_PERIPH ) );
 
     TEST_ASSERT_GREATER_OR_EQUAL_UINT32( 3u, itAdc_CompleteCnt );
@@ -383,7 +503,7 @@ void It_Adc_Set_RegStart_ContinuousDmaCircular_HalfAndCompleteCallbacks( void )
         TEST_ASSERT_UINT16_WITHIN( IT_ADC_NOISE_LSB, itAdc_Buffer[ 0u ], itAdc_Buffer[ dataIdx ] );
     }
 
-    TEST_ASSERT_UINT32_WITHIN( IT_ADC_VDDA_TOL_MV, IT_ADC_VDDA_MV, It_Adc_Get_Vdda_mV( itAdc_Buffer[ 0u ] ) );
+    TEST_ASSERT_UINT32_WITHIN( IT_ADC_VDDA_TOL_MV, IT_ADC_VDDA_MV, ItAdc_Get_Vdda_mV( itAdc_Buffer[ 0u ] ) );
 }
 
 
@@ -402,7 +522,7 @@ void It_Adc_Set_InjStart_VrefInjected_InjCallbackAndData( void )
     adc_Config_t config;
     adc_Data_t   injData = 0u;
 
-    It_Adc_Get_Config( &config, ADC_TRANSFER_MODE_ISR, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_ISR, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
     config.PeriphConfig[ IT_ADC_PERIPH ].InjChannelsCnt                      = 1u;
     config.PeriphConfig[ IT_ADC_PERIPH ].InjChannels[ 0u ].ChannelId         = IT_ADC_CH_VREF;
     config.PeriphConfig[ IT_ADC_PERIPH ].InjChannels[ 0u ].ChannelInput      = ADC_CHANNEL_INPUT_VREF;
@@ -410,11 +530,11 @@ void It_Adc_Set_InjStart_VrefInjected_InjCallbackAndData( void )
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
 
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_InjStart( IT_ADC_PERIPH ) );
-    It_Adc_Wait( &itAdc_InjCnt, 1u );
+    ItAdc_Wait( &itAdc_InjCnt, 1u );
 
     TEST_ASSERT_EQUAL_UINT32( 1u, itAdc_InjCnt );
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_InjData( IT_ADC_PERIPH, ADC_INJ_SEQUENCE_1, &injData ) );
-    TEST_ASSERT_UINT32_WITHIN( IT_ADC_VDDA_TOL_MV, IT_ADC_VDDA_MV, It_Adc_Get_Vdda_mV( injData ) );
+    TEST_ASSERT_UINT32_WITHIN( IT_ADC_VDDA_TOL_MV, IT_ADC_VDDA_MV, ItAdc_Get_Vdda_mV( injData ) );
 }
 
 /*----------------------------- Analog watchdog ------------------------------*/
@@ -438,8 +558,8 @@ void It_Adc_AwdInit_VrefAboveHighThreshold_AwdFlagActive( void )
     adc_AwdThreshold_t lowThr   = 0xFFFFu;
     adc_AwdThreshold_t highThr  = 0xFFFFu;
 
-    It_Adc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
-    It_Adc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
 
     /* VREFINT (~1500 LSB) is above the window 0 - 100 */
@@ -456,7 +576,7 @@ void It_Adc_AwdInit_VrefAboveHighThreshold_AwdFlagActive( void )
 
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Clear_Flag( IT_ADC_PERIPH, ADC_FLAG_AWD1 ) );
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
-    It_Adc_Wait( &itAdc_CompleteCnt, 1u );
+    ItAdc_Wait( &itAdc_CompleteCnt, 1u );
 
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_Flag( IT_ADC_PERIPH, ADC_FLAG_AWD1, &awdFlag ) );
     TEST_ASSERT_EQUAL( ADC_FLAG_ACTIVE, awdFlag );
@@ -478,8 +598,8 @@ void It_Adc_AwdInit_VrefInsideWindow_AwdFlagInactive( void )
     adc_AwdConfig_t awdConfig;
     adc_FlagState_t awdFlag = ADC_FLAG_ACTIVE;
 
-    It_Adc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
-    It_Adc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 1u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
 
     awdConfig.AwdId            = ADC_AWD_1;
@@ -491,10 +611,291 @@ void It_Adc_AwdInit_VrefInsideWindow_AwdFlagInactive( void )
 
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Clear_Flag( IT_ADC_PERIPH, ADC_FLAG_AWD1 ) );
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
-    It_Adc_Wait( &itAdc_CompleteCnt, 1u );
+    ItAdc_Wait( &itAdc_CompleteCnt, 1u );
 
     TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_Flag( IT_ADC_PERIPH, ADC_FLAG_AWD1, &awdFlag ) );
     TEST_ASSERT_EQUAL( ADC_FLAG_INACTIVE, awdFlag );
+}
+
+/**
+ * \brief   Regular discontinuous mode converts 1 rank per software start.
+ *
+ * \details Initializes ADC1 in polling mode with one-shot buffer of 2 samples and regular
+ *          sequence VREFINT, temperature sensor converted 1 rank per trigger
+ *          (ADC_REG_TRIGGER_MODE_DISCONT_1RANK, software trigger), clears the end of
+ *          sequence flag and:
+ *          1. starts the regular group, waits for the 1st sample and calls Adc_Task() for
+ *             IT_ADC_IDLE_LOOPS more iterations (far longer than one conversion),
+ *          2. starts the regular group again and waits for transfer complete.
+ *          1 rank per trigger is used, because RM0456 Rev 6 33.4.16 states that ADSTART is cleared at
+ *          the end of conversion (EOC) in discontinuous mode with software trigger.
+ * \note    Task AB#1822: the regular discontinuous mode was not available. Without DISCEN the
+ *          1st start converts the whole sequence (2nd sample written, EOS set).
+ *
+ * \par Expected results
+ * - Conversion mode reads back ADC_REG_TRIGGER_MODE_DISCONT_1RANK.
+ * 1. 1 sample is stored, the 2nd buffer item is not written, no transfer complete, end of
+ *    sequence flag INACTIVE.
+ * 2. The start is accepted (ADSTART was cleared by HW after the 1st subgroup): transfer complete 1x,
+ *    end of sequence flag ACTIVE, no error.
+ * - VREFINT sample: VDDA = 3300 mV +- 150 mV, temperature sensor sample within 500 - 900 mV.
+ */
+void It_Adc_Set_RegStart_DiscontinuousOneRank_EachStartConvertsSubgroup( void )
+{
+    adc_Config_t         config;
+    adc_RegTriggerMode_t triggerMode = ADC_REG_TRIGGER_MODE_CNT;
+    adc_FlagState_t      eosFlag     = ADC_FLAG_ACTIVE;
+    uint32_t             vdda_mV     = 0u;
+
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 2u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_DISCONT_1RANK );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_TEMP, ADC_CHANNEL_INPUT_TEMP );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_TriggerMode( IT_ADC_PERIPH, &triggerMode ) );
+    TEST_ASSERT_EQUAL( ADC_REG_TRIGGER_MODE_DISCONT_1RANK, triggerMode );
+
+    /* 1st subgroup: rank 1 */
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Clear_Flag( IT_ADC_PERIPH, ADC_FLAG_REG_EOS ) );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
+    ItAdc_Wait_Sample( 0u );
+    ItAdc_Poll( IT_ADC_IDLE_LOOPS );
+
+    TEST_ASSERT_NOT_EQUAL( IT_ADC_BUF_EMPTY, itAdc_Buffer[ 0u ] );
+    TEST_ASSERT_EQUAL_HEX16( IT_ADC_BUF_EMPTY, itAdc_Buffer[ 1u ] );
+    TEST_ASSERT_EQUAL_UINT32( 0u, itAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_Flag( IT_ADC_PERIPH, ADC_FLAG_REG_EOS, &eosFlag ) );
+    TEST_ASSERT_EQUAL( ADC_FLAG_INACTIVE, eosFlag );
+
+    /* 2nd subgroup: rank 2 */
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
+    ItAdc_Wait( &itAdc_CompleteCnt, 1u );
+
+    TEST_ASSERT_EQUAL_UINT32( 1u, itAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL_UINT32( 0u, itAdc_ErrorCnt );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_Flag( IT_ADC_PERIPH, ADC_FLAG_REG_EOS, &eosFlag ) );
+    TEST_ASSERT_EQUAL( ADC_FLAG_ACTIVE, eosFlag );
+
+    vdda_mV = ItAdc_Get_Vdda_mV( itAdc_Buffer[ 0u ] );
+    TEST_ASSERT_UINT32_WITHIN( IT_ADC_VDDA_TOL_MV, IT_ADC_VDDA_MV, vdda_mV );
+    TEST_ASSERT_UINT32_WITHIN( ( IT_ADC_TEMP_MAX_MV - IT_ADC_TEMP_MIN_MV ) / 2u, ( IT_ADC_TEMP_MAX_MV + IT_ADC_TEMP_MIN_MV ) / 2u,
+                               ItAdc_Get_Voltage_mV( itAdc_Buffer[ 1u ], vdda_mV ) );
+}
+
+/**
+ * \brief   Analog watchdog 1 monitors only the selected channel.
+ *
+ * \details Initializes ADC1 with regular sequence VREFINT (channel 0), temperature sensor
+ *          (channel 19) in polling mode (buffer of 2 samples), converts the sequence once and
+ *          sets the upper threshold to the middle between both results (lower threshold 0), then:
+ *          1. AWD1 on the single regular temperature sensor channel, converts the sequence,
+ *          2. AWD1 on the single regular VREFINT channel, converts the sequence again.
+ *          The window contains the temperature sensor voltage, VREFINT is above it.
+ * \note    Task AB#1823: the single channel modes were rejected (no channel in adc_AwdConfig_t).
+ *
+ * \par Expected results
+ * - VREFINT result is above the temperature sensor result by more than IT_ADC_AWD_MARGIN_LSB.
+ * 1. ADC_REQUEST_OK, AWD1 flag INACTIVE (VREFINT is outside the window, but not monitored).
+ * 2. ADC_REQUEST_OK, AWD1 flag ACTIVE.
+ * - Transfer complete 3x, no error.
+ */
+void It_Adc_AwdInit_Awd1SingleChannel_OnlySelectedChannelMonitored( void )
+{
+    adc_Config_t    config;
+    adc_AwdConfig_t awdConfig;
+    adc_FlagState_t awdFlag = ADC_FLAG_ACTIVE;
+
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 2u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_TEMP, ADC_CHANNEL_INPUT_TEMP );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
+
+    /* Threshold between temperature sensor and VREFINT */
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
+    ItAdc_Wait( &itAdc_CompleteCnt, 1u );
+    TEST_ASSERT_GREATER_THAN_UINT32( (uint32_t)itAdc_Buffer[ 1u ] + IT_ADC_AWD_MARGIN_LSB, itAdc_Buffer[ 0u ] );
+
+    /* 1. Temperature sensor only - inside the window */
+    awdConfig.AwdId            = ADC_AWD_1;
+    awdConfig.AwdMode          = ADC_AWD_MODE_SINGLE_REGULAR;
+    awdConfig.AwdChannelId     = IT_ADC_CH_TEMP;
+    awdConfig.AwdChannelMask   = ADC_AWD_CHANNEL_MASK_NONE;
+    awdConfig.AwdLowThreshold  = 0u;
+    awdConfig.AwdHighThreshold = (adc_AwdThreshold_t)( ( (uint32_t)itAdc_Buffer[ 0u ] + itAdc_Buffer[ 1u ] ) / 2u );
+    awdConfig.AwdFilter        = ADC_AWD_FILTER_NONE;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_AwdInit( IT_ADC_PERIPH, &awdConfig ) );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Clear_Flag( IT_ADC_PERIPH, ADC_FLAG_AWD1 ) );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
+    ItAdc_Wait( &itAdc_CompleteCnt, 2u );
+
+    TEST_ASSERT_EQUAL_UINT32( 2u, itAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_Flag( IT_ADC_PERIPH, ADC_FLAG_AWD1, &awdFlag ) );
+    TEST_ASSERT_EQUAL( ADC_FLAG_INACTIVE, awdFlag );
+
+    /* 2. VREFINT only - above the window */
+    awdConfig.AwdChannelId = IT_ADC_CH_VREF;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_AwdInit( IT_ADC_PERIPH, &awdConfig ) );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Clear_Flag( IT_ADC_PERIPH, ADC_FLAG_AWD1 ) );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
+    ItAdc_Wait( &itAdc_CompleteCnt, 3u );
+
+    TEST_ASSERT_EQUAL_UINT32( 3u, itAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL_UINT32( 0u, itAdc_ErrorCnt );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_Flag( IT_ADC_PERIPH, ADC_FLAG_AWD1, &awdFlag ) );
+    TEST_ASSERT_EQUAL( ADC_FLAG_ACTIVE, awdFlag );
+}
+
+
+/**
+ * \brief   Analog watchdog 2 monitors only the channels of the channel set.
+ *
+ * \details Initializes ADC1 with regular sequence VREFINT (channel 0), temperature sensor
+ *          (channel 19) in polling mode (buffer of 2 samples), converts the sequence once and
+ *          sets the upper threshold to the middle between both results (lower threshold 0), then:
+ *          1. AWD2 in single mode with channel set {19}, converts the sequence,
+ *          2. AWD2 with channel set {19, 0}, converts the sequence again.
+ * \note    Task AB#1823: the channel set of AWD2 / AWD3 was not configurable.
+ *
+ * \par Expected results
+ * - VREFINT result is above the temperature sensor result by more than IT_ADC_AWD_MARGIN_LSB.
+ * 1. ADC_REQUEST_OK, AWD2 flag INACTIVE (VREFINT is outside the window, but not monitored).
+ * 2. ADC_REQUEST_OK, AWD2 flag ACTIVE.
+ * - Transfer complete 3x, no error.
+ */
+void It_Adc_AwdInit_Awd2ChannelMask_OnlySelectedChannelsMonitored( void )
+{
+    adc_Config_t    config;
+    adc_AwdConfig_t awdConfig;
+    adc_FlagState_t awdFlag = ADC_FLAG_ACTIVE;
+
+    ItAdc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 2u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_TEMP, ADC_CHANNEL_INPUT_TEMP );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
+
+    /* Threshold between temperature sensor and VREFINT */
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
+    ItAdc_Wait( &itAdc_CompleteCnt, 1u );
+    TEST_ASSERT_GREATER_THAN_UINT32( (uint32_t)itAdc_Buffer[ 1u ] + IT_ADC_AWD_MARGIN_LSB, itAdc_Buffer[ 0u ] );
+
+    /* 1. Temperature sensor only - inside the window */
+    awdConfig.AwdId            = ADC_AWD_2;
+    awdConfig.AwdMode          = ADC_AWD_MODE_SINGLE;
+    awdConfig.AwdChannelId     = IT_ADC_CH_TEMP;
+    awdConfig.AwdChannelMask   = ADC_AWD_CHANNEL_MASK_19;
+    awdConfig.AwdLowThreshold  = 0u;
+    awdConfig.AwdHighThreshold = (adc_AwdThreshold_t)( ( (uint32_t)itAdc_Buffer[ 0u ] + itAdc_Buffer[ 1u ] ) / 2u );
+    awdConfig.AwdFilter        = ADC_AWD_FILTER_NONE;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_AwdInit( IT_ADC_PERIPH, &awdConfig ) );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Clear_Flag( IT_ADC_PERIPH, ADC_FLAG_AWD2 ) );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
+    ItAdc_Wait( &itAdc_CompleteCnt, 2u );
+
+    TEST_ASSERT_EQUAL_UINT32( 2u, itAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_Flag( IT_ADC_PERIPH, ADC_FLAG_AWD2, &awdFlag ) );
+    TEST_ASSERT_EQUAL( ADC_FLAG_INACTIVE, awdFlag );
+
+    /* 2. Temperature sensor and VREFINT - VREFINT above the window */
+    awdConfig.AwdChannelMask = ADC_AWD_CHANNEL_MASK_19 | ADC_AWD_CHANNEL_MASK_0;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_AwdInit( IT_ADC_PERIPH, &awdConfig ) );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Clear_Flag( IT_ADC_PERIPH, ADC_FLAG_AWD2 ) );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
+    ItAdc_Wait( &itAdc_CompleteCnt, 3u );
+
+    TEST_ASSERT_EQUAL_UINT32( 3u, itAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL_UINT32( 0u, itAdc_ErrorCnt );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_Flag( IT_ADC_PERIPH, ADC_FLAG_AWD2, &awdFlag ) );
+    TEST_ASSERT_EQUAL( ADC_FLAG_ACTIVE, awdFlag );
+}
+
+/*----------------------------- Dividers (ADC_DIVIDERS) ---------------------*/
+
+/**
+ * \brief   Divider voltages on PA0 and PC0 converted in polling mode.
+ *
+ * \details Polling mode, one-shot buffer of 2 samples, regular sequence channel 5 (PA0) and channel 1 (PC0).
+ *
+ * \par Expected results
+ * - Transfer complete callback 1x, no error callback.
+ * - PA0: 4095 x 4.7k / 14.7k = 1309 LSB +- 3 %, PC0: 4095 x 10k / 14.7k = 2785 LSB +- 3 %.
+ */
+void It_Adc_Dividers_PollSequence_RatiosMatchResistors( void )
+{
+    adc_Config_t config;
+
+    ItAdc_RequireDividers();
+
+    ItAdc_Get_Config( &config,
+                      ADC_TRANSFER_MODE_POLL,
+                      IT_ADC_DIV_SAMPLES,
+                      ADC_BUFFER_MODE_ONE_SHOT,
+                      ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_DIV_PA0, ADC_CHANNEL_INPUT_PIN_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_DIV_PC0, ADC_CHANNEL_INPUT_PIN_SINGLE );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
+    ItAdc_Wait( &itAdc_CompleteCnt, 1u );
+
+    TEST_ASSERT_EQUAL_UINT32( 1u, itAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL_UINT32( 0u, itAdc_ErrorCnt );
+    ItAdc_Check_Divider( itAdc_Buffer[ 0u ], IT_ADC_DIV_R_10K, IT_ADC_DIV_R_4K7, "PA0 divider (channel 5)" );
+    ItAdc_Check_Divider( itAdc_Buffer[ 1u ], IT_ADC_DIV_R_4K7, IT_ADC_DIV_R_10K, "PC0 divider (channel 1)" );
+}
+
+
+/**
+ * \brief   Divider voltages and VREFINT converted in DMA mode.
+ *
+ * \details DMA mode (GPDMA1 channel 7), one-shot buffer of 3 samples, regular sequence
+ *          channel 5 (PA0), channel 1 (PC0), VREFINT. The divider voltages are calculated
+ *          with VDDA of the VREFINT conversion (typical VREFINT voltage).
+ *
+ * \par Expected results
+ * - Transfer complete callback 1x, no error callback.
+ * - Divider ratios as in polling mode (+- 3 %).
+ * - PA0 = VDDA x 4.7k / 14.7k, PC0 = VDDA x 10k / 14.7k with VDDA 3300 mV (+- 8 %).
+ */
+void It_Adc_Dividers_DmaSequenceWithVref_VoltagesMatchResistors( void )
+{
+    adc_Config_t config;
+
+    ItAdc_RequireDividers();
+
+    ItAdc_Get_Config( &config,
+                      ADC_TRANSFER_MODE_DMA,
+                      IT_ADC_DIV_VREF_SAMPLES,
+                      ADC_BUFFER_MODE_ONE_SHOT,
+                      ADC_REG_TRIGGER_MODE_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_DIV_PA0, ADC_CHANNEL_INPUT_PIN_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_DIV_PC0, ADC_CHANNEL_INPUT_PIN_SINGLE );
+    ItAdc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
+    ItAdc_Wait( &itAdc_CompleteCnt, 1u );
+
+    TEST_ASSERT_EQUAL_UINT32( 1u, itAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL_UINT32( 0u, itAdc_ErrorCnt );
+    ItAdc_Check_Divider( itAdc_Buffer[ 0u ], IT_ADC_DIV_R_10K, IT_ADC_DIV_R_4K7, "PA0 divider (channel 5)" );
+    ItAdc_Check_Divider( itAdc_Buffer[ 1u ], IT_ADC_DIV_R_4K7, IT_ADC_DIV_R_10K, "PC0 divider (channel 1)" );
+
+    const uint32_t vdda_mV   = ItAdc_Get_Vdda_mV( itAdc_Buffer[ 2u ] );
+    const uint32_t pa0Expect = ( IT_ADC_VDDA_MV * IT_ADC_DIV_R_4K7 ) / ( IT_ADC_DIV_R_10K + IT_ADC_DIV_R_4K7 );
+    const uint32_t pc0Expect = ( IT_ADC_VDDA_MV * IT_ADC_DIV_R_10K ) / ( IT_ADC_DIV_R_10K + IT_ADC_DIV_R_4K7 );
+
+    TEST_ASSERT_UINT32_WITHIN_MESSAGE( ( pa0Expect * IT_ADC_DIV_VOLT_TOL_PCT ) / IT_ADC_PERCENT,
+                                       pa0Expect,
+                                       ItAdc_Get_Voltage_mV( itAdc_Buffer[ 0u ], vdda_mV ),
+                                       "PA0 divider voltage [mV]" );
+    TEST_ASSERT_UINT32_WITHIN_MESSAGE( ( pc0Expect * IT_ADC_DIV_VOLT_TOL_PCT ) / IT_ADC_PERCENT,
+                                       pc0Expect,
+                                       ItAdc_Get_Voltage_mV( itAdc_Buffer[ 1u ], vdda_mV ),
+                                       "PC0 divider voltage [mV]" );
 }
 
 /* ========================== LOCAL FUNCTIONS =============================== */
@@ -509,7 +910,7 @@ void It_Adc_AwdInit_VrefInsideWindow_AwdFlagInactive( void )
  * \param bufferMode    [in]: Data buffer mode
  * \param triggerMode   [in]: Regular group single / continuous conversion
  */
-static void It_Adc_Get_Config( adc_Config_t * const config, adc_TransferMode_t transferMode,
+static void ItAdc_Get_Config( adc_Config_t * const config, adc_TransferMode_t transferMode,
                               adc_BufferSize_t bufferSize, adc_BufferMode_t bufferMode,
                               adc_RegTriggerMode_t triggerMode )
 {
@@ -536,10 +937,10 @@ static void It_Adc_Get_Config( adc_Config_t * const config, adc_TransferMode_t t
         periphCfg->DataConfig.DmaChannelId             = ADC_DMA_CHANNEL_7;
         periphCfg->DataConfig.DmaPriority              = ADC_DMA_PRIORITY_HIGH;
         periphCfg->DataConfig.IrqPriority              = 5u;
-        periphCfg->DataConfig.HalfTransferCallback     = It_Adc_HalfCallback;
-        periphCfg->DataConfig.TransferCompleteCallback = It_Adc_CompleteCallback;
-        periphCfg->DataConfig.ErrorCallback            = It_Adc_ErrorCallback;
-        periphCfg->DataConfig.InjCompleteCallback      = It_Adc_InjCallback;
+        periphCfg->DataConfig.HalfTransferCallback     = ItAdc_HalfCallback;
+        periphCfg->DataConfig.TransferCompleteCallback = ItAdc_CompleteCallback;
+        periphCfg->DataConfig.ErrorCallback            = ItAdc_ErrorCallback;
+        periphCfg->DataConfig.InjCompleteCallback      = ItAdc_InjCallback;
     }
 
     config->ClockSource  = IT_ADC_CLK_SRC;
@@ -554,7 +955,7 @@ static void It_Adc_Get_Config( adc_Config_t * const config, adc_TransferMode_t t
  * \param channelId        [in]: Channel
  * \param channelInput     [in]: Channel input
  */
-static void It_Adc_Add_RegChannel( adc_Config_t * const config, adc_ChannelId_t channelId, adc_ChannelInput_t channelInput )
+static void ItAdc_Add_RegChannel( adc_Config_t * const config, adc_ChannelId_t channelId, adc_ChannelInput_t channelInput )
 {
     adc_PeriphConfig_t * const periphCfg = &config->PeriphConfig[ IT_ADC_PERIPH ];
 
@@ -572,9 +973,44 @@ static void It_Adc_Add_RegChannel( adc_Config_t * const config, adc_ChannelId_t 
  * \param counter     [in]: Callback call counter
  * \param expectedCnt [in]: Required count
  */
-static void It_Adc_Wait( volatile const uint32_t * const counter, uint32_t expectedCnt )
+static void ItAdc_Wait( volatile const uint32_t * const counter, uint32_t expectedCnt )
 {
-    for( uint32_t loopIdx = 0u; ( IT_ADC_WAIT_LOOPS > loopIdx ) && ( expectedCnt > *counter ); loopIdx++ )
+    for( uint32_t loopIdx = 0u;
+         ( IT_ADC_WAIT_LOOPS > loopIdx  ) &&
+         ( expectedCnt       > *counter );
+         loopIdx++ )
+    {
+        Adc_Task();
+    }
+}
+
+
+/**
+ * \brief Waits until a data buffer item is written or timeout (Adc_Task called - data
+ *        transfer in polling mode).
+ *
+ * \param sampleIdx [in]: Index of the data buffer item (< IT_ADC_BUF_SIZE)
+ */
+static void ItAdc_Wait_Sample( uint32_t sampleIdx )
+{
+    for( uint32_t loopIdx = 0u;
+         ( IT_ADC_WAIT_LOOPS > loopIdx                   ) &&
+         ( IT_ADC_BUF_EMPTY == itAdc_Buffer[ sampleIdx ] );
+         loopIdx++ )
+    {
+        Adc_Task();
+    }
+}
+
+
+/**
+ * \brief Calls Adc_Task() a given count of times (data transfer in polling mode continues).
+ *
+ * \param loopCnt [in]: Count of Adc_Task() calls
+ */
+static void ItAdc_Poll( uint32_t loopCnt )
+{
+    for( uint32_t loopIdx = 0u; loopCnt > loopIdx; loopIdx++ )
     {
         Adc_Task();
     }
@@ -588,13 +1024,13 @@ static void It_Adc_Wait( volatile const uint32_t * const counter, uint32_t expec
  *
  * \return VDDA [mV]
  */
-static uint32_t It_Adc_Get_Vdda_mV( adc_Data_t vrefRaw12 )
+static uint32_t ItAdc_Get_Vdda_mV( adc_Data_t vrefRaw12 )
 {
     uint32_t vdda_mV = 0u;
 
     if( 0u != vrefRaw12 )
     {
-        vdda_mV = ( IT_ADC_VREFINT_MV * 4095u ) / vrefRaw12;
+        vdda_mV = ( IT_ADC_VREFINT_MV * IT_ADC_FULL_SCALE_12BIT ) / vrefRaw12;
     }
     else
     {
@@ -613,28 +1049,28 @@ static uint32_t It_Adc_Get_Vdda_mV( adc_Data_t vrefRaw12 )
  *
  * \return Input voltage [mV]
  */
-static uint32_t It_Adc_Get_Voltage_mV( adc_Data_t raw12, uint32_t vdda_mV )
+static uint32_t ItAdc_Get_Voltage_mV( adc_Data_t raw12, uint32_t vdda_mV )
 {
-    return ( ( (uint32_t)raw12 * vdda_mV ) / 4095u );
+    return ( ( (uint32_t)raw12 * vdda_mV ) / IT_ADC_FULL_SCALE_12BIT );
 }
 
 
 /** \brief Data buffer half filled callback */
-static void It_Adc_HalfCallback( void )
+static void ItAdc_HalfCallback( void )
 {
     itAdc_HalfCnt++;
 }
 
 
 /** \brief Data buffer filled callback */
-static void It_Adc_CompleteCallback( void )
+static void ItAdc_CompleteCallback( void )
 {
     itAdc_CompleteCnt++;
 }
 
 
 /** \brief Injected sequence converted callback */
-static void It_Adc_InjCallback( void )
+static void ItAdc_InjCallback( void )
 {
     itAdc_InjCnt++;
 }
@@ -645,8 +1081,50 @@ static void It_Adc_InjCallback( void )
  *
  * \param errorId [in]: Error identification
  */
-static void It_Adc_ErrorCallback( adc_ErrorId_t errorId )
+static void ItAdc_ErrorCallback( adc_ErrorId_t errorId )
 {
     (void)errorId;
     itAdc_ErrorCnt++;
+}
+
+
+/**
+ * \brief   Ignores the test on a board without the dividers.
+ *
+ * \details Fixture of the board (EmBi_Platform, IntegrationTesting README "Board fixtures"):
+ *          feature ADC_DIVIDERS. A board without a fixture (IT_FIXTURE not defined) is expected
+ *          to have the dividers of its board block.
+ */
+static void ItAdc_RequireDividers( void )
+{
+#if ( 0u == IT_ADC_DIV_AVAILABLE )
+    TEST_IGNORE_MESSAGE( "No ADC dividers known for the board" );
+#elif defined(IT_FEATURE_ADC_DIVIDERS) || \
+      !defined(IT_FIXTURE)
+    /* Dividers on PA0 and PC0 */
+#else
+    TEST_IGNORE_MESSAGE( "Board without the fixture ADC_DIVIDERS (dividers on PA0 / PC0)" );
+#endif
+}
+
+
+/**
+ * \brief Checks a 12-bit conversion result of a divider against the ratio of its resistors.
+ *
+ * \param raw12     [in]: Conversion result (12-bit)
+ * \param topOhm    [in]: Resistor to +3V3 (= VDDA) [Ohm]
+ * \param bottomOhm [in]: Resistor to GND [Ohm]
+ * \param message   [in]: Message of a failed check
+ */
+static void ItAdc_Check_Divider( adc_Data_t raw12,
+                                  uint32_t topOhm,
+                                  uint32_t bottomOhm,
+                                  const char * const message )
+{
+    const uint32_t expected = ( IT_ADC_FULL_SCALE_12BIT * bottomOhm ) / ( topOhm + bottomOhm );
+
+    TEST_ASSERT_UINT32_WITHIN_MESSAGE( ( expected * IT_ADC_DIV_TOL_PCT ) / IT_ADC_PERCENT,
+                                       expected,
+                                       (uint32_t)raw12,
+                                       message );
 }

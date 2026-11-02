@@ -45,7 +45,7 @@ Different families are maintained in separate branches; users can switch to the 
 | `Adc_Types.h`  | Public types                                                                         |
 | `Adc.c`        | Clock, peripheral and channel configuration, calibration, triggers, analog watchdogs |
 | `Adc_Poll.c`   | Data transfer in polling mode (`Adc_Task()`)                                         |
-| `Adc_Isr.c`    | Data transfer in interrupt mode (ADC1 and ADC2 share interrupt ADC1_2)               |
+| `Adc_Isr.c`    | Data transfer in interrupt mode (ADC1 and ADC2 share interrupt ADC1_2, see below)    |
 | `Adc_Dma.c`    | Data transfer in DMA mode (GPDMA channel per peripheral, DMNGT data management)      |
 | `Adc.h`, `Adc_Poll.h`, `Adc_Isr.h`, `Adc_Dma.h` | Private interfaces (not exported by the CMake library) |
 
@@ -93,6 +93,40 @@ Different families are maintained in separate branches; users can switch to the 
 
 ---
 
+## Regular group conversion modes
+
+`adc_PeriphConfig_t.RegTriggerMode` and `Adc_Set_TriggerMode()` / `Adc_Get_TriggerMode()` select the conversion mode of the regular group (RM0456 Rev 6 33.4.21 and 33.6.4, ADC_CFGR1 bits CONT, DISCEN, DISCNUM[2:0]):
+
+| `adc_RegTriggerMode_t` | ADC_CFGR1 | Behavior |
+|---|---|---|
+| `ADC_REG_TRIGGER_MODE_SINGLE` | CONT = 0, DISCEN = 0 | every trigger converts the whole sequence |
+| `ADC_REG_TRIGGER_MODE_CONTINUOUS` | CONT = 1, DISCEN = 0 | after the first trigger the sequence is converted repeatedly |
+| `ADC_REG_TRIGGER_MODE_DISCONT_1RANK` - `ADC_REG_TRIGGER_MODE_DISCONT_8RANKS` | CONT = 0, DISCEN = 1, DISCNUM = n - 1 | every trigger converts the next n ranks (subgroup) of the sequence |
+
+In discontinuous mode the last subgroup of the sequence can have less than n ranks (no rollover), the end of sequence flag (`ADC_FLAG_REG_EOS`) is set after the last rank and the next trigger starts with rank 1 again. With software trigger the next subgroup is started by `Adc_Set_RegStart()` (the reference manual states that ADSTART is cleared at the end of conversion, EOC = 1, in discontinuous mode with software trigger; the integration test uses 1 rank per trigger), the data transfer continues at the current buffer position.
+
+- CONT and DISCEN are never set at the same time (forbidden by the reference manual); the bit which is cleared is written first.
+- Discontinuous mode can not be combined with auto-injected mode (`ADC_INJ_TRIGGER_AUTO`, JAUTO): `Adc_PeriphInit()` rejects the configuration and `Adc_Set_TriggerMode()` rejects a discontinuous mode while JAUTO is set.
+- `Adc_PeriphInit()` clears the auto-injected mode of a previous configuration before the regular group is configured.
+
+---
+
+## Analog watch-dog channel selection
+
+`Adc_AwdInit()` selects the monitored channels by `adc_AwdConfig_t.AwdMode` (RM0456 Rev 6 33.4.30, ADC_CFGR1 AWD1CH / AWD1SGL / AWD1EN / JAWD1EN, ADC_AWD2CR / ADC_AWD3CR):
+
+| Watch-dog | `ADC_AWD_MODE_ALL` | `_ALL_REGULAR` / `_ALL_INJECTED` | `ADC_AWD_MODE_SINGLE` | `_SINGLE_REGULAR` / `_SINGLE_INJECTED` |
+|---|---|---|---|---|
+| `ADC_AWD_1` | all channels | all channels of the group | channel `AwdChannelId` (regular or injected) | channel `AwdChannelId` of the group |
+| `ADC_AWD_2`, `ADC_AWD_3` | all channels | rejected | channels of `AwdChannelMask` (regular or injected) | rejected |
+
+- `adc_AwdChannelMask_t` is a channel set (bit n = channel n) built from `ADC_AWD_CHANNEL_MASK_0` - `ADC_AWD_CHANNEL_MASK_19` combined by bitwise OR (`ADC_AWD_CHANNEL_MASK_ALL`, `ADC_AWD_CHANNEL_MASK_NONE`). It is a type definition with symbolic constants, not an enumeration (MISRA - an OR of enumeration constants is not a value of the enumeration).
+- The monitored channels must be converted in the monitored group of the last `Adc_PeriphInit()` (the reference manual requires the channels selected by AWD1CH / AWDxCH also in the sequence registers); an empty channel set (it disables AWD2 / AWD3) is rejected. After `Adc_Deinit()` the single channel modes are rejected until the next `Adc_PeriphInit()`.
+- `AwdChannelId` and `AwdChannelMask` are used only by the modes above, the other field is ignored.
+- Device errata "ADC_AWDy_OUT reset by non-guarded channels" (ES0499 Rev 10 2.9.1, ES0553 Rev 5 2.9.2, ES0587 Rev 5 2.5.1, ES0595 Rev 2 2.6.2) concern only the ADC_AWDy_OUT signal routed to the timers, not the watch-dog flags.
+
+---
+
 ## Usage Notes
 
 - Clock source and divider can be changed only while all ADC peripherals are disabled. The resulting kernel clock must be within 0.14 - 55 MHz (e.g. HCLK 160 MHz needs divider 4 or more).
@@ -102,6 +136,7 @@ Different families are maintained in separate branches; users can switch to the 
 - Analog watchdog thresholds are given in the configured resolution; the module aligns them to the 14-bit comparison of the HW. AWD2 / AWD3 support only the "all channels" mode and no filtering.
 - Calibration runs on every activation of the peripheral (`Adc_Set_PeriphActive()`). The extended calibration step is selected from the device identification (DBGMCU IDCODE) as in ST HAL.
 - In polling mode `Adc_Task()` must be called periodically, it stores conversion results into the data buffer and calls the callbacks.
+- ADC1 and ADC2 share the interrupt ADC1_2 (one handler services both peripherals). The interrupt is used by the interrupt and DMA data transfer modes and is disabled in NVIC only when the last peripheral using it is deinitialized - deinitialization of ADC1 does not stop the interrupt data transfer of ADC2 and vice versa.
 
 ### Example
 
@@ -137,7 +172,7 @@ if( ADC_REQUEST_OK == Adc_Init( &adcConfig ) )
   cmake --preset STM32U5A5xJ_UnitTest && cmake --build --preset STM32U5A5xJ_UnitTest
   ctest --test-dir Build_STM32U5A5xJ_UnitTest -L Adc
   ```
-- Integration tests (target, NUCLEO board): `Tests/IntegrationTests/ItTest_Adc.c` - internal channels of ADC1 (VREFINT, temperature sensor) are converted, no external wiring is needed.
+- Integration tests (target, NUCLEO board): `Tests/IntegrationTests/ItTest_Adc.c` - internal channels of ADC1 (VREFINT, temperature sensor) are converted, no external wiring is needed. The shared interrupt test (MCUs with ADC2) converts the unconnected pin PC0 by ADC2, the value is not checked.
 
 ---
 

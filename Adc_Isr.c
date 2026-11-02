@@ -27,8 +27,9 @@ typedef struct
 
 /* ======================== FORWARD DECLARATIONS ============================ */
 
-static void               Adc_Isr_Adc1Handler ( void );
-static adc_RequestState_t Adc_Isr_Handler     ( adc_PeriphId_t periphId );
+static void                Adc_Isr_Adc1Handler  ( void );
+static adc_RequestState_t  Adc_Isr_Handler      ( adc_PeriphId_t periphId );
+static adc_FunctionState_t Adc_Isr_Get_LineUsed ( adc_PeriphId_t periphId );
 
 /* ========================== SYMBOLIC CONSTANTS ============================ */
 
@@ -52,6 +53,10 @@ static const adc_IsrIrqConfig_t adc_IsrIrqConfig[ ] =
 };
 
 _Static_assert( ADC_PERIPH_CNT == ( sizeof(adc_IsrIrqConfig) / sizeof(adc_IsrIrqConfig_t) ), "Adc: adc_IsrIrqConfig has incorrect size." );
+
+
+/** Peripherals using their NVIC line (line enabled by Adc_Isr_Init(), released by Adc_Isr_Deinit()) */
+static volatile adc_FunctionState_t adc_IsrLineOwned[ ADC_PERIPH_CNT ];
 
 /* ========================= EXPORTED FUNCTIONS ============================= */
 
@@ -122,6 +127,9 @@ adc_RequestState_t Adc_Isr_Init( adc_PeriphId_t periphId )
     {
         const adc_IsrIrqConfig_t * const irqConfig = &adc_IsrIrqConfig[ periphId ];
 
+        /* Peripheral owns the line before the interrupt is enabled */
+        adc_IsrLineOwned[ periphId ] = ADC_FUNCTION_ACTIVE;
+
         nvicState = Nvic_Set_PeriphIrq_Handler( irqConfig->IrqId, irqConfig->Handler );
 
         if( NVIC_REQUEST_OK == nvicState )
@@ -174,6 +182,9 @@ adc_RequestState_t Adc_Isr_Init( adc_PeriphId_t periphId )
 /**
  * \brief Disables all ADC interrupts used by the handler and the ADC interrupt in NVIC
  *
+ * \note  ADC1 and ADC2 share the NVIC line ADC1_2 - the line is disabled only when no other
+ *        peripheral of the line uses it (interrupt or DMA data transfer).
+ *
  * \param periphId [in]: ADC peripheral identification, value from \ref adc_PeriphId_t
  *
  * \return Function processing state. Returns \ref ADC_REQUEST_OK if request
@@ -185,23 +196,38 @@ adc_RequestState_t Adc_Isr_Deinit( adc_PeriphId_t periphId )
 
     retState = Adc_Isr_Set_IrqInactive( periphId, ADC_ISR_IT_ALL );
 
-    if( ( ADC_REQUEST_OK == retState ) &&
-        ( ADC_FUNCTION_ACTIVE == adc_IsrIrqConfig[ periphId ].Available )    )
+    /* Peripheral range is checked again next to the line tables - the range check of
+     * Adc_Isr_Set_IrqInactive is done in another translation unit (Adc_Get_PeriphReg) */
+    if( ( ADC_REQUEST_OK      == retState                               ) &&
+        ( ADC_PERIPH_CNT       > periphId                               ) &&
+        ( ADC_FUNCTION_ACTIVE == adc_IsrIrqConfig[ periphId ].Available ) &&
+        ( ADC_FUNCTION_ACTIVE == adc_IsrLineOwned[ periphId ]           )    )
     {
-        const nvic_RequestState_t nvicState = Nvic_Set_PeriphIrq_Inactive( adc_IsrIrqConfig[ periphId ].IrqId );
+        const adc_FunctionState_t lineUsed = Adc_Isr_Get_LineUsed( periphId );
 
-        if( NVIC_REQUEST_OK == nvicState )
+        adc_IsrLineOwned[ periphId ] = ADC_FUNCTION_INACTIVE;
+
+        if( ADC_FUNCTION_INACTIVE == lineUsed )
         {
-            retState = ADC_REQUEST_OK;
+            const nvic_RequestState_t nvicState = Nvic_Set_PeriphIrq_Inactive( adc_IsrIrqConfig[ periphId ].IrqId );
+
+            if( NVIC_REQUEST_OK == nvicState )
+            {
+                retState = ADC_REQUEST_OK;
+            }
+            else
+            {
+                retState = ADC_REQUEST_ERROR;
+            }
         }
         else
         {
-            retState = ADC_REQUEST_ERROR;
+            /* Shared line is still used by the other peripheral of the line */
         }
     }
     else
     {
-        /* Interrupts could not be disabled or NVIC interrupt is not available */
+        /* Interrupts could not be disabled, NVIC interrupt is not available or the peripheral does not own the line */
     }
 
     return ( retState );
@@ -338,6 +364,36 @@ adc_RequestState_t Adc_Isr_Set_IrqInactive( adc_PeriphId_t periphId, uint32_t ll
 }
 
 /* =========================== LOCAL FUNCTIONS ============================== */
+
+/**
+ * \brief Returns whether another ADC peripheral of the same NVIC line owns the line
+ *
+ * \param periphId [in]: ADC peripheral identification, must be valid
+ *
+ * \return \ref ADC_FUNCTION_ACTIVE if another peripheral of the line enabled the line,
+ *         otherwise \ref ADC_FUNCTION_INACTIVE.
+ */
+static adc_FunctionState_t Adc_Isr_Get_LineUsed( adc_PeriphId_t periphId )
+{
+    adc_FunctionState_t lineUsed = ADC_FUNCTION_INACTIVE;
+
+    for( adc_PeriphId_t periphIdx = ADC_PERIPH_1; ADC_PERIPH_CNT > periphIdx; periphIdx ++ )
+    {
+        if( ( periphIdx                           != periphId                           ) &&
+            ( adc_IsrIrqConfig[ periphIdx ].IrqId == adc_IsrIrqConfig[ periphId ].IrqId ) &&
+            ( ADC_FUNCTION_ACTIVE                 == adc_IsrLineOwned[ periphIdx ]      )    )
+        {
+            lineUsed = ADC_FUNCTION_ACTIVE;
+        }
+        else
+        {
+            /* Peripheral does not use the line */
+        }
+    }
+
+    return ( lineUsed );
+}
+
 
 /**
  * \brief Common ADC interrupt handler - processes enabled and pending EOC, OVR and JEOS events
