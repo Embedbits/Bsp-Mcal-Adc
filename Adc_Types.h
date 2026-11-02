@@ -256,12 +256,28 @@ typedef enum
 }   adc_InjTriggerId_t;
 
 
-/** \brief List of regular channels trigger modes */
+/**
+ * \brief List of regular channels trigger modes
+ *
+ * Discontinuous modes (DISCEN, DISCNUM): every trigger event converts the next n ranks (subgroup)
+ * of the regular sequence. The last subgroup of the sequence can have less than n ranks (no rollover),
+ * the trigger event after the end of the sequence starts with rank 1 again. Discontinuous modes
+ * can not be combined with auto-injected mode (\ref ADC_INJ_TRIGGER_AUTO) and with the injected
+ * discontinuous mode (\ref ADC_INJ_TRIGGER_MODE_SINGLE).
+ */
 typedef enum
 {
-    ADC_REG_TRIGGER_MODE_SINGLE = 0u, /**< Trigger event is needed to start each conversion list                   */
-    ADC_REG_TRIGGER_MODE_CONTINUOUS,  /**< After first trigger, the conversion list will be continuously converted */
-    ADC_REG_TRIGGER_MODE_CNT          /**< Count of available trigger modes                                        */
+    ADC_REG_TRIGGER_MODE_SINGLE = 0u,    /**< Trigger event is needed to start each conversion list                   */
+    ADC_REG_TRIGGER_MODE_CONTINUOUS,     /**< After first trigger, the conversion list will be continuously converted */
+    ADC_REG_TRIGGER_MODE_DISCONT_1RANK,  /**< Discontinuous mode, every trigger event converts the next rank          */
+    ADC_REG_TRIGGER_MODE_DISCONT_2RANKS, /**< Discontinuous mode, every trigger event converts the next 2 ranks       */
+    ADC_REG_TRIGGER_MODE_DISCONT_3RANKS, /**< Discontinuous mode, every trigger event converts the next 3 ranks       */
+    ADC_REG_TRIGGER_MODE_DISCONT_4RANKS, /**< Discontinuous mode, every trigger event converts the next 4 ranks       */
+    ADC_REG_TRIGGER_MODE_DISCONT_5RANKS, /**< Discontinuous mode, every trigger event converts the next 5 ranks       */
+    ADC_REG_TRIGGER_MODE_DISCONT_6RANKS, /**< Discontinuous mode, every trigger event converts the next 6 ranks       */
+    ADC_REG_TRIGGER_MODE_DISCONT_7RANKS, /**< Discontinuous mode, every trigger event converts the next 7 ranks       */
+    ADC_REG_TRIGGER_MODE_DISCONT_8RANKS, /**< Discontinuous mode, every trigger event converts the next 8 ranks       */
+    ADC_REG_TRIGGER_MODE_CNT             /**< Count of available trigger modes                                        */
 }   adc_RegTriggerMode_t;
 
 
@@ -423,49 +439,20 @@ typedef enum
 
 
 /**
- * \brief Analog Watch-Dog 1 operation modes.
+ * \brief Analog Watch-Dog 1 operation modes (monitored channels).
  *
+ * The single channel modes monitor the channel adc_AwdConfig_t.AwdChannelId (AWDCH, AWDSGL).
  */
 typedef enum
 {
-    ADC_AWD_MODE_ALL  = 0u,       /**< All channels will be monitored (regular & injected)     */
-    ADC_AWD_MODE_ALL_REGULAR,     /**< All channels configured as regular will be monitored    */
-    ADC_AWD_MODE_ALL_INJECTED,    /**< All channels configured as injected will be monitored   */
-    ADC_AWD_MODE_SINGLE,          /**< Single channel (Regular & injected) will be monitored   */
-    ADC_AWD_MODE_SINGLE_REGULAR,  /**< Single channel configured as regular will be monitored  */
-    ADC_AWD_MODE_SINGLE_INJECTED, /**< Single channel configured as injected will be monitored */
-    ADC_AWD_MODE_CNT,             /**< Count of Analog Watch-dog modes                         */
+    ADC_AWD_MODE_ALL  = 0u,       /**< All channels will be monitored (regular & injected)                  */
+    ADC_AWD_MODE_ALL_REGULAR,     /**< All channels configured as regular will be monitored                 */
+    ADC_AWD_MODE_ALL_INJECTED,    /**< All channels configured as injected will be monitored                */
+    ADC_AWD_MODE_SINGLE,          /**< Channel AwdChannelId (regular & injected) will be monitored          */
+    ADC_AWD_MODE_SINGLE_REGULAR,  /**< Channel AwdChannelId configured as regular will be monitored         */
+    ADC_AWD_MODE_SINGLE_INJECTED, /**< Channel AwdChannelId configured as injected will be monitored        */
+    ADC_AWD_MODE_CNT,             /**< Count of Analog Watch-dog modes                                      */
 }   adc_AwdMode_t;
-
-
-/**
- * \brief List of available AWD channels.
- *
- * \note AWD1 - Support only one channel at a time
- *
- */
-typedef enum
-{
-    ADC_AWD_MODE_CHANNEL_0  = (1u << 0u),  /**< Channel 0 will be monitored  */
-    ADC_AWD_MODE_CHANNEL_1  = (1u << 1u),  /**< Channel 1 will be monitored  */
-    ADC_AWD_MODE_CHANNEL_2  = (1u << 2u),  /**< Channel 2 will be monitored  */
-    ADC_AWD_MODE_CHANNEL_3  = (1u << 3u),  /**< Channel 3 will be monitored  */
-    ADC_AWD_MODE_CHANNEL_4  = (1u << 4u),  /**< Channel 4 will be monitored  */
-    ADC_AWD_MODE_CHANNEL_5  = (1u << 5u),  /**< Channel 5 will be monitored  */
-    ADC_AWD_MODE_CHANNEL_6  = (1u << 6u),  /**< Channel 6 will be monitored  */
-    ADC_AWD_MODE_CHANNEL_7  = (1u << 7u),  /**< Channel 7 will be monitored  */
-    ADC_AWD_MODE_CHANNEL_8  = (1u << 8u),  /**< Channel 8 will be monitored  */
-    ADC_AWD_MODE_CHANNEL_9  = (1u << 9u),  /**< Channel 9 will be monitored  */
-    ADC_AWD_MODE_CHANNEL_10 = (1u << 10u), /**< Channel 10 will be monitored */
-    ADC_AWD_MODE_CHANNEL_11 = (1u << 11u), /**< Channel 11 will be monitored */
-    ADC_AWD_MODE_CHANNEL_12 = (1u << 12u), /**< Channel 12 will be monitored */
-    ADC_AWD_MODE_CHANNEL_13 = (1u << 13u), /**< Channel 13 will be monitored */
-    ADC_AWD_MODE_CHANNEL_14 = (1u << 14u), /**< Channel 14 will be monitored */
-    ADC_AWD_MODE_CHANNEL_15 = (1u << 15u), /**< Channel 15 will be monitored */
-    ADC_AWD_MODE_CHANNEL_16 = (1u << 16u), /**< Channel 16 will be monitored */
-    ADC_AWD_MODE_CHANNEL_17 = (1u << 17u), /**< Channel 17 will be monitored */
-    ADC_AWD_MODE_CHANNEL_18 = (1u << 18u), /**< Channel 18 will be monitored */
-}   adc_AwdChannelId_t;
 
 
 /** \brief Type representing Analog Watch-dog threshold values (in RAW of the configured resolution) */
@@ -640,11 +627,21 @@ typedef struct
     adc_Callback_t     *InjCompleteCallback;      /**< Injected sequence converted (JEOC). ADC_NULL_PTR if not used. */
 }   adc_DataConfig_t;
 
-/** \brief Analog Watch-dog configuration structure */
+/**
+ * \brief Analog Watch-dog configuration structure
+ *
+ * Monitored channels (\ref adc_AwdMode_t):
+ * - ADC_AWD_MODE_ALL, ADC_AWD_MODE_ALL_REGULAR, ADC_AWD_MODE_ALL_INJECTED: all converted channels,
+ *   AwdChannelId is not used.
+ * - ADC_AWD_MODE_SINGLE, ADC_AWD_MODE_SINGLE_REGULAR, ADC_AWD_MODE_SINGLE_INJECTED: the channel AwdChannelId.
+ *   The channel must be converted in the monitored group (regular and / or injected sequence configured
+ *   by Adc_PeriphInit()).
+ */
 typedef struct
 {
     adc_AwdId_t        AwdId;            /**< Analog Watch-dog identification                 */
     adc_AwdMode_t      AwdMode;          /**< Monitored channel group                         */
+    adc_ChannelId_t    AwdChannelId;     /**< Monitored channel in the single channel modes   */
     adc_AwdThreshold_t AwdLowThreshold;  /**< Lower threshold (RAW value)                     */
     adc_AwdThreshold_t AwdHighThreshold; /**< Upper threshold (RAW value)                     */
     adc_AwdFilter_t    AwdFilter;        /**< Event filtering (only NONE on STM32F4)          */

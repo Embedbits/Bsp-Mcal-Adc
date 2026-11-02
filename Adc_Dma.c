@@ -394,7 +394,8 @@ adc_RequestState_t Adc_Dma_Start( adc_PeriphId_t periphId )
         retState = Adc_Get_XferContext( periphId, &xferCtx );
     }
 
-    if( ( ADC_REQUEST_OK == retState ) && ( ADC_FUNCTION_ACTIVE == adc_DmaChannelState[ periphId ].Initialized ) )
+    if( ( ADC_REQUEST_OK == retState ) &&
+        ( ADC_FUNCTION_ACTIVE == adc_DmaChannelState[ periphId ].Initialized )    )
     {
         const uint32_t        llDmaMode = LL_ADC_REG_GetDMATransfer( periphReg );
         const dma_PeriphId_t  dmaPeriph = (dma_PeriphId_t)adc_DmaChannelState[ periphId ].PeriphId;
@@ -464,7 +465,8 @@ adc_RequestState_t Adc_Dma_Stop( adc_PeriphId_t periphId )
 {
     adc_RequestState_t retState = ADC_REQUEST_ERROR;
 
-    if( ( ADC_PERIPH_CNT > periphId ) && ( ADC_FUNCTION_ACTIVE == adc_DmaChannelState[ periphId ].Initialized ) )
+    if( ( ADC_PERIPH_CNT > periphId ) &&
+        ( ADC_FUNCTION_ACTIVE == adc_DmaChannelState[ periphId ].Initialized )    )
     {
         const dma_RequestState_t dmaState = Dma_Set_TransferInactive( (dma_PeriphId_t)adc_DmaChannelState[ periphId ].PeriphId,
                                                                       (dma_ChannelId_t)adc_DmaChannelState[ periphId ].ChannelId );

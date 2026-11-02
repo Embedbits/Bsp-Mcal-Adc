@@ -142,7 +142,8 @@ adc_RequestState_t Adc_Isr_Init( adc_PeriphId_t periphId )
     }
 
     /* Injected end of sequence is reported independently of regular data transfer */
-    if( ( ADC_REQUEST_OK == retState ) && ( ADC_NULL_PTR != xferCtx->Config.InjCompleteCallback ) )
+    if( ( ADC_REQUEST_OK == retState ) &&
+        ( ADC_NULL_PTR != xferCtx->Config.InjCompleteCallback )    )
     {
         retState = Adc_Isr_Set_IrqActive( periphId, LL_ADC_IT_JEOS );
     }
@@ -267,7 +268,8 @@ adc_RequestState_t Adc_Isr_Set_IrqActive( adc_PeriphId_t periphId, uint32_t llIt
 
     retState = Adc_Get_PeriphReg( periphId, &periphReg );
 
-    if( ( ADC_REQUEST_OK == retState ) && ( llItMask == ( llItMask & ADC_ISR_IT_ALL ) ) )
+    if( ( ADC_REQUEST_OK == retState ) &&
+        ( llItMask == ( llItMask & ADC_ISR_IT_ALL ) )    )
     {
         /* Stale events are cleared (SR bits are cleared by writing 0) */
         WRITE_REG( periphReg->SR, ~Adc_Isr_Get_FlagMask( llItMask ) );
@@ -314,7 +316,8 @@ adc_RequestState_t Adc_Isr_Set_IrqInactive( adc_PeriphId_t periphId, uint32_t ll
 
     retState = Adc_Get_PeriphReg( periphId, &periphReg );
 
-    if( ( ADC_REQUEST_OK == retState ) && ( llItMask == ( llItMask & ADC_ISR_IT_ALL ) ) )
+    if( ( ADC_REQUEST_OK == retState ) &&
+        ( llItMask == ( llItMask & ADC_ISR_IT_ALL ) )    )
     {
         CLEAR_BIT( periphReg->CR1, llItMask );
 
