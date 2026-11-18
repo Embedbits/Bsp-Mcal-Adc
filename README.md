@@ -41,6 +41,40 @@ Different families are maintained in separate branches; users can switch to the 
 
 ---
 
+## Regular group conversion modes
+
+`adc_PeriphConfig_t.RegTriggerMode` and `Adc_Set_TriggerMode()` / `Adc_Get_TriggerMode()` select the conversion mode of the regular group (RM0385 Rev 9 and RM0410 Rev 5 15.3.11 and 15.13.2, RM0431 Rev 4 14.3.11 and 14.13.2; ADC_CR1 bits DISCEN, DISCNUM[2:0], ADC_CR2 bit CONT):
+
+| `adc_RegTriggerMode_t` | Registers | Behavior |
+|---|---|---|
+| `ADC_REG_TRIGGER_MODE_SINGLE` | DISCEN = 0, CONT = 0 | every trigger converts the whole sequence |
+| `ADC_REG_TRIGGER_MODE_CONTINUOUS` | DISCEN = 0, CONT = 1 | after the first trigger the sequence is converted repeatedly |
+| `ADC_REG_TRIGGER_MODE_DISCONT_1RANK` - `ADC_REG_TRIGGER_MODE_DISCONT_8RANKS` | DISCEN = 1, DISCNUM = n - 1, CONT = 0 | every trigger converts the next n ranks (subgroup) of the sequence |
+
+In discontinuous mode the last subgroup of the sequence can have less than n ranks (no rollover) and the next trigger starts with rank 1 again. With software trigger every `Adc_Set_RegStart()` converts the next subgroup, the data transfer continues at the current buffer position. STM32F7 has no end of sequence flag - the end of the sequence is reported by the data transfer (transfer complete callback).
+
+- DISCEN / DISCNUM are written by `Adc_Set_TriggerMode()`, CONT is written by `Adc_Set_RegStart()` and cleared by `Adc_Set_RegStop()`; CONT and DISCEN are never set at the same time.
+- Discontinuous mode can not be combined with auto-injected mode (`ADC_INJ_TRIGGER_AUTO`, JAUTO) and must not be set for the regular and the injected group at the same time (`ADC_INJ_TRIGGER_MODE_SINGLE`, JDISCEN): `Adc_PeriphInit()` rejects the configuration and `Adc_Set_TriggerMode()` rejects a discontinuous mode while JAUTO or JDISCEN is set.
+- `Adc_PeriphInit()` clears the auto-injected mode and the discontinuous modes of a previous configuration before the regular group is configured (`Adc_Deinit()` does not reset ADC_CR1).
+
+---
+
+## Analog watch-dog channel selection
+
+`Adc_AwdInit()` selects the channels monitored by analog watch-dog 1 by `adc_AwdConfig_t.AwdMode` (RM0385 Rev 9 15.3.8, RM0410 Rev 5 15.3.8, RM0431 Rev 4 14.3.8; ADC_CR1 bits AWDCH[4:0], AWDSGL, AWDEN, JAWDEN):
+
+| `adc_AwdMode_t` | Monitored channels |
+|---|---|
+| `ADC_AWD_MODE_ALL` | all channels of both groups |
+| `ADC_AWD_MODE_ALL_REGULAR` / `ADC_AWD_MODE_ALL_INJECTED` | all channels of the group |
+| `ADC_AWD_MODE_SINGLE` | channel `AwdChannelId` (regular or injected) |
+| `ADC_AWD_MODE_SINGLE_REGULAR` / `ADC_AWD_MODE_SINGLE_INJECTED` | channel `AwdChannelId` of the group |
+
+- The monitored channel of the single channel modes must be converted in the monitored group of the last `Adc_PeriphInit()` (the watch-dog compares only converted values). After `Adc_Deinit()` the single channel modes are rejected until the next `Adc_PeriphInit()`.
+- `AwdChannelId` (`adc_ChannelId_t`) is used only by the single channel modes. The unused enumeration of channel bit masks `adc_AwdChannelId_t` was removed (analog watch-dog 1 monitors one channel).
+
+---
+
 ## Usage Notes
 
 - The ADC module is hardware dependent and must be configured per STM32 family branch.  

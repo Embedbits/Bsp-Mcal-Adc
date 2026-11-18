@@ -36,6 +36,8 @@ static void         It_Adc_Get_Config        ( adc_Config_t * const config, adc_
                                               adc_RegTriggerMode_t triggerMode );
 static void         It_Adc_Add_RegChannel   ( adc_Config_t * const config, adc_ChannelId_t channelId, adc_ChannelInput_t channelInput );
 static void         It_Adc_Wait             ( volatile const uint32_t * const counter, uint32_t expectedCnt );
+static void         It_Adc_Wait_Sample      ( uint32_t sampleIdx );
+static void         It_Adc_Poll             ( uint32_t loopCnt );
 static uint32_t     It_Adc_Get_Vdda_mV      ( adc_Data_t vrefRaw12 );
 static uint32_t     It_Adc_Get_Voltage_mV   ( adc_Data_t raw12, uint32_t vdda_mV );
 
@@ -76,6 +78,16 @@ static void         It_Adc_ErrorCallback    ( adc_ErrorId_t errorId );
 /** Maximal count of wait loop iterations (Adc_Task called) */
 #define IT_ADC_WAIT_LOOPS                   ( 1000000u )
 
+/** Count of Adc_Task calls after a discontinuous subgroup - takes far longer than several conversions */
+#define IT_ADC_IDLE_LOOPS                   ( 20000u )
+
+/** Value of a data buffer item which was not written by the module */
+#define IT_ADC_BUF_EMPTY                    ( 0xFFFFu )
+
+/** Minimal difference of the VREFINT and the temperature sensor result for the analog watch-dog
+ *  window between them [LSB, 12-bit] */
+#define IT_ADC_AWD_MARGIN_LSB               ( 64u )
+
 /* ============================== MACROS ==================================== */
 
 /* ========================== LOCAL VARIABLES =============================== */
@@ -100,7 +112,7 @@ void setUp( void )
 
     for( uint32_t dataIdx = 0u; IT_ADC_BUF_SIZE > dataIdx; dataIdx++ )
     {
-        itAdc_Buffer[ dataIdx ] = 0xFFFFu;
+        itAdc_Buffer[ dataIdx ] = IT_ADC_BUF_EMPTY;
     }
 }
 
@@ -550,6 +562,131 @@ void It_Adc_AwdInit_VrefInsideWindow_AwdFlagInactive( void )
     TEST_ASSERT_EQUAL( ADC_FLAG_INACTIVE, awdFlag );
 }
 
+
+/**
+ * \brief   Regular discontinuous mode converts 2 ranks per software start.
+ *
+ * \details Initializes ADC1 in polling mode with one-shot buffer of 3 samples and regular
+ *          sequence VREFINT, temperature sensor, VREFINT converted 2 ranks per trigger
+ *          (ADC_REG_TRIGGER_MODE_DISCONT_2RANKS, software trigger) and:
+ *          1. starts the regular group, waits for the 2nd sample and calls Adc_Task() for
+ *             IT_ADC_IDLE_LOOPS more iterations (far longer than one conversion),
+ *          2. starts the regular group again and waits for transfer complete.
+ * \note    Task AB#1816: the regular discontinuous mode was not available. Without DISCEN the
+ *          1st start converts the whole sequence (3rd sample written, transfer complete).
+ *
+ * \par Expected results
+ * - Conversion mode reads back ADC_REG_TRIGGER_MODE_DISCONT_2RANKS.
+ * 1. 2 samples are stored, the 3rd buffer item is not written, no transfer complete.
+ * 2. The start is accepted, the last subgroup has 1 rank (no rollover): transfer complete 1x,
+ *    no error.
+ * - VREFINT samples: VDDA = IT_ADC_VDDA_MV +- IT_ADC_VDDA_TOL_MV, temperature sensor sample within
+ *   IT_ADC_TEMP_MIN_MV - IT_ADC_TEMP_MAX_MV.
+ */
+void It_Adc_Set_RegStart_DiscontinuousTwoRanks_EachStartConvertsSubgroup( void )
+{
+    adc_Config_t         config;
+    adc_RegTriggerMode_t triggerMode = ADC_REG_TRIGGER_MODE_CNT;
+    uint32_t             vdda_mV     = 0u;
+
+    It_Adc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 3u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_DISCONT_2RANKS );
+    It_Adc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    It_Adc_Add_RegChannel( &config, IT_ADC_CH_TEMP, ADC_CHANNEL_INPUT_TEMP );
+    It_Adc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_TriggerMode( IT_ADC_PERIPH, &triggerMode ) );
+    TEST_ASSERT_EQUAL( ADC_REG_TRIGGER_MODE_DISCONT_2RANKS, triggerMode );
+
+    /* 1st subgroup: ranks 1 and 2 */
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
+    It_Adc_Wait_Sample( 1u );
+    It_Adc_Poll( IT_ADC_IDLE_LOOPS );
+
+    TEST_ASSERT_NOT_EQUAL( IT_ADC_BUF_EMPTY, itAdc_Buffer[ 0u ] );
+    TEST_ASSERT_NOT_EQUAL( IT_ADC_BUF_EMPTY, itAdc_Buffer[ 1u ] );
+    TEST_ASSERT_EQUAL_HEX16( IT_ADC_BUF_EMPTY, itAdc_Buffer[ 2u ] );
+    TEST_ASSERT_EQUAL_UINT32( 0u, itAdc_CompleteCnt );
+
+    /* 2nd subgroup: rank 3 (the last subgroup is shorter, no rollover) */
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
+    It_Adc_Wait( &itAdc_CompleteCnt, 1u );
+
+    TEST_ASSERT_EQUAL_UINT32( 1u, itAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL_UINT32( 0u, itAdc_ErrorCnt );
+
+    vdda_mV = It_Adc_Get_Vdda_mV( itAdc_Buffer[ 0u ] );
+    TEST_ASSERT_UINT32_WITHIN( IT_ADC_VDDA_TOL_MV, IT_ADC_VDDA_MV, vdda_mV );
+    TEST_ASSERT_UINT32_WITHIN( IT_ADC_VDDA_TOL_MV, IT_ADC_VDDA_MV, It_Adc_Get_Vdda_mV( itAdc_Buffer[ 2u ] ) );
+    TEST_ASSERT_UINT32_WITHIN( ( IT_ADC_TEMP_MAX_MV - IT_ADC_TEMP_MIN_MV ) / 2u, ( IT_ADC_TEMP_MAX_MV + IT_ADC_TEMP_MIN_MV ) / 2u,
+                               It_Adc_Get_Voltage_mV( itAdc_Buffer[ 1u ], vdda_mV ) );
+}
+
+
+/**
+ * \brief   Analog watchdog 1 monitors only the selected channel.
+ *
+ * \details Initializes ADC1 with regular sequence VREFINT, temperature sensor in polling mode
+ *          (buffer of 2 samples), converts the sequence once and sets the upper threshold to the
+ *          middle between both results (lower threshold 0), then:
+ *          1. AWD1 on the single regular temperature sensor channel, converts the sequence,
+ *          2. AWD1 on the single regular VREFINT channel, converts the sequence again.
+ *          The window contains the temperature sensor voltage, VREFINT is above it.
+ * \note    Task AB#1817: the single channel modes were rejected (no channel in adc_AwdConfig_t).
+ *
+ * \par Expected results
+ * - VREFINT result is above the temperature sensor result by more than IT_ADC_AWD_MARGIN_LSB.
+ * 1. ADC_REQUEST_OK, AWD1 flag INACTIVE (VREFINT is outside the window, but not monitored).
+ * 2. ADC_REQUEST_OK, AWD1 flag ACTIVE.
+ * - Transfer complete 3x, no error.
+ */
+void It_Adc_AwdInit_Awd1SingleChannel_OnlySelectedChannelMonitored( void )
+{
+    adc_Config_t    config;
+    adc_AwdConfig_t awdConfig;
+    adc_FlagState_t awdFlag = ADC_FLAG_ACTIVE;
+
+    It_Adc_Get_Config( &config, ADC_TRANSFER_MODE_POLL, 2u, ADC_BUFFER_MODE_ONE_SHOT, ADC_REG_TRIGGER_MODE_SINGLE );
+    It_Adc_Add_RegChannel( &config, IT_ADC_CH_VREF, ADC_CHANNEL_INPUT_VREF );
+    It_Adc_Add_RegChannel( &config, IT_ADC_CH_TEMP, ADC_CHANNEL_INPUT_TEMP );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Init( &config ) );
+
+    /* Threshold between temperature sensor and VREFINT */
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
+    It_Adc_Wait( &itAdc_CompleteCnt, 1u );
+    TEST_ASSERT_GREATER_THAN_UINT32( (uint32_t)itAdc_Buffer[ 1u ] + IT_ADC_AWD_MARGIN_LSB, itAdc_Buffer[ 0u ] );
+
+    /* 1. Temperature sensor only - inside the window */
+    awdConfig.AwdId            = ADC_AWD_1;
+    awdConfig.AwdMode          = ADC_AWD_MODE_SINGLE_REGULAR;
+    awdConfig.AwdChannelId     = IT_ADC_CH_TEMP;
+    awdConfig.AwdLowThreshold  = 0u;
+    awdConfig.AwdHighThreshold = (adc_AwdThreshold_t)( ( (uint32_t)itAdc_Buffer[ 0u ] + itAdc_Buffer[ 1u ] ) / 2u );
+    awdConfig.AwdFilter        = ADC_AWD_FILTER_NONE;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_AwdInit( IT_ADC_PERIPH, &awdConfig ) );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Clear_Flag( IT_ADC_PERIPH, ADC_FLAG_AWD1 ) );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
+    It_Adc_Wait( &itAdc_CompleteCnt, 2u );
+
+    TEST_ASSERT_EQUAL_UINT32( 2u, itAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_Flag( IT_ADC_PERIPH, ADC_FLAG_AWD1, &awdFlag ) );
+    TEST_ASSERT_EQUAL( ADC_FLAG_INACTIVE, awdFlag );
+
+    /* 2. VREFINT only - above the window */
+    awdConfig.AwdChannelId = IT_ADC_CH_VREF;
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_AwdInit( IT_ADC_PERIPH, &awdConfig ) );
+
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Clear_Flag( IT_ADC_PERIPH, ADC_FLAG_AWD1 ) );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Set_RegStart( IT_ADC_PERIPH ) );
+    It_Adc_Wait( &itAdc_CompleteCnt, 3u );
+
+    TEST_ASSERT_EQUAL_UINT32( 3u, itAdc_CompleteCnt );
+    TEST_ASSERT_EQUAL_UINT32( 0u, itAdc_ErrorCnt );
+    TEST_ASSERT_EQUAL( ADC_REQUEST_OK, Adc_Get_Flag( IT_ADC_PERIPH, ADC_FLAG_AWD1, &awdFlag ) );
+    TEST_ASSERT_EQUAL( ADC_FLAG_ACTIVE, awdFlag );
+}
+
 /* ========================== LOCAL FUNCTIONS =============================== */
 
 /**
@@ -633,6 +770,38 @@ static void It_Adc_Wait( volatile const uint32_t * const counter, uint32_t expec
          ( IT_ADC_WAIT_LOOPS > loopIdx ) &&
          ( expectedCnt > *counter );
          loopIdx++ )
+    {
+        Adc_Task();
+    }
+}
+
+
+/**
+ * \brief Waits until a data buffer item is written or timeout (Adc_Task called - data
+ *        transfer in polling mode).
+ *
+ * \param sampleIdx [in]: Index of the data buffer item (< IT_ADC_BUF_SIZE)
+ */
+static void It_Adc_Wait_Sample( uint32_t sampleIdx )
+{
+    for( uint32_t loopIdx = 0u;
+         ( IT_ADC_WAIT_LOOPS > loopIdx                   ) &&
+         ( IT_ADC_BUF_EMPTY == itAdc_Buffer[ sampleIdx ] );
+         loopIdx++ )
+    {
+        Adc_Task();
+    }
+}
+
+
+/**
+ * \brief Calls Adc_Task() a given count of times (data transfer in polling mode continues).
+ *
+ * \param loopCnt [in]: Count of Adc_Task() calls
+ */
+static void It_Adc_Poll( uint32_t loopCnt )
+{
+    for( uint32_t loopIdx = 0u; loopCnt > loopIdx; loopIdx++ )
     {
         Adc_Task();
     }

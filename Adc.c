@@ -54,7 +54,10 @@ typedef struct
 
 
 /** Configuration kept by the module, not readable from the HW while the conversion is stopped
- *  (external trigger edge and continuous mode are written to EXTEN / JEXTEN / CONT at start) */
+ *  (external trigger edge and continuous mode are written to EXTEN / JEXTEN / CONT at start).
+ *  RegChannels / InjChannels (bit n = channel n) hold the channels of the sequences configured by the
+ *  last successful Adc_PeriphInit() (none after Adc_Deinit()) - the sequencer registers keep the ranks
+ *  of a group which is not used. */
 typedef struct
 {
     adc_RegTriggerId_t   RegTriggerId;                    /**< Regular group trigger source        */
@@ -63,7 +66,18 @@ typedef struct
     adc_InjTriggerId_t   InjTriggerId;                    /**< Injected group trigger source       */
     adc_TriggerEdge_t    InjTriggerEdge;                  /**< Injected group external trigger edge*/
     adc_ChannelInput_t   ChannelInput[ ADC_CHANNEL_CNT ]; /**< Input selected per channel          */
+    uint32_t             RegChannels;                     /**< Channels of the regular sequence    */
+    uint32_t             InjChannels;                     /**< Channels of the injected sequence   */
 }   adc_PeriphShadow_t;
+
+
+/** LL encodings of one channel monitored by analog watch-dog 1 (AWDCH, AWDSGL, AWDEN, JAWDEN) */
+typedef struct
+{
+    uint32_t RegInj; /**< LL_ADC_AWD_CHANNEL_x_REG_INJ - channel converted by the regular or the injected group */
+    uint32_t Reg;    /**< LL_ADC_AWD_CHANNEL_x_REG     - channel converted by the regular group                 */
+    uint32_t Inj;    /**< LL_ADC_AWD_CHANNEL_x_INJ     - channel converted by the injected group                */
+}   adc_Awd1ChannelConfig_t;
 
 
 /** Data transfer mode handler interface (implemented in Adc_Dma.c / Adc_Isr.c / Adc_Poll.c) */
@@ -94,6 +108,8 @@ static adc_RequestState_t Adc_Set_RegSequencer        ( const adc_PeriphConfig_t
 static adc_RequestState_t Adc_Set_InjSequencer        ( const adc_PeriphConfig_t * const adcConfig );
 static adc_RequestState_t Adc_Set_InjAutoMode         ( adc_PeriphId_t periphId, uint32_t llTrigAuto );
 static adc_RequestState_t Adc_Set_InjDiscontMode      ( adc_PeriphId_t periphId, uint32_t llDiscont );
+static adc_RequestState_t Adc_Set_RegDiscontMode      ( adc_PeriphId_t periphId, uint32_t llDiscont );
+static adc_RequestState_t Adc_Get_AwdChannels        ( adc_PeriphId_t periphId, const adc_AwdConfig_t * const awdConfig, uint32_t * const llChannels );
 static adc_RequestState_t Adc_Set_Delay               ( adc_TimeUs_t delayUs );
 static adc_RequestState_t Adc_Get_ClockFreq           ( adc_ClkDiv_t clkDiv, adc_FreqHz_t * const clkFreqHz );
 static adc_RequestState_t Adc_Get_ActiveClockFreq     ( adc_FreqHz_t * const clkFreqHz );
@@ -180,6 +196,12 @@ static adc_RequestState_t Adc_Set_XferStop            ( adc_PeriphId_t periphId 
 
 /** ADC channel without GPIO pin */
 #define ADC_PIN_NONE                             { .PortId = GPIO_PORT_CNT, .PinId = GPIO_PIN_ID_CNT }
+
+/** Channel set (bit n = channel n) holding one channel (\ref adc_ChannelId_t) */
+#define ADC_CHANNEL_TO_MASK( channelId )         ( 1uL << (uint32_t)(channelId) )
+
+/** Channel set without channel */
+#define ADC_CHANNEL_MASK_NONE                    ( 0uL )
 
 /* ========================== EXPORTED VARIABLES ============================ */
 
@@ -457,6 +479,49 @@ static const uint32_t adc_InjTriggerModeLut[ ADC_INJ_TRIGGER_MODE_CNT ] =
 {
     [ADC_INJ_TRIGGER_MODE_CONTINUOUS] = LL_ADC_INJ_SEQ_DISCONT_DISABLE, /* Trigger converts the sequence */
     [ADC_INJ_TRIGGER_MODE_SINGLE]     = LL_ADC_INJ_SEQ_DISCONT_1RANK,   /* Trigger converts one rank     */
+};
+
+
+/** adc_RegTriggerMode_t -> LL_ADC_REG_SEQ_DISCONT_x (DISCEN, DISCNUM). Continuous mode (CONT) is written
+ *  by Adc_Set_RegStart() from the shadow (adc_PeriphShadow_t.RegTriggerMode) */
+static const uint32_t adc_RegDiscontLut[ ADC_REG_TRIGGER_MODE_CNT ] =
+{
+    [ADC_REG_TRIGGER_MODE_SINGLE]         = LL_ADC_REG_SEQ_DISCONT_DISABLE,
+    [ADC_REG_TRIGGER_MODE_CONTINUOUS]     = LL_ADC_REG_SEQ_DISCONT_DISABLE,
+    [ADC_REG_TRIGGER_MODE_DISCONT_1RANK]  = LL_ADC_REG_SEQ_DISCONT_1RANK,
+    [ADC_REG_TRIGGER_MODE_DISCONT_2RANKS] = LL_ADC_REG_SEQ_DISCONT_2RANKS,
+    [ADC_REG_TRIGGER_MODE_DISCONT_3RANKS] = LL_ADC_REG_SEQ_DISCONT_3RANKS,
+    [ADC_REG_TRIGGER_MODE_DISCONT_4RANKS] = LL_ADC_REG_SEQ_DISCONT_4RANKS,
+    [ADC_REG_TRIGGER_MODE_DISCONT_5RANKS] = LL_ADC_REG_SEQ_DISCONT_5RANKS,
+    [ADC_REG_TRIGGER_MODE_DISCONT_6RANKS] = LL_ADC_REG_SEQ_DISCONT_6RANKS,
+    [ADC_REG_TRIGGER_MODE_DISCONT_7RANKS] = LL_ADC_REG_SEQ_DISCONT_7RANKS,
+    [ADC_REG_TRIGGER_MODE_DISCONT_8RANKS] = LL_ADC_REG_SEQ_DISCONT_8RANKS,
+};
+
+
+/** adc_ChannelId_t -> LL encodings of the channel monitored by analog watch-dog 1 (single channel modes,
+ *  AWDCH[4:0] = channel 0 - 18, RM0385 Rev 9 15.13.2, RM0410 Rev 5 15.13.2, RM0431 Rev 4 14.13.2) */
+static const adc_Awd1ChannelConfig_t adc_Awd1ChannelLut[ ADC_CHANNEL_CNT ] =
+{
+    [ADC_CHANNEL_0]  = { .RegInj = LL_ADC_AWD_CHANNEL_0_REG_INJ,  .Reg = LL_ADC_AWD_CHANNEL_0_REG,  .Inj = LL_ADC_AWD_CHANNEL_0_INJ  },
+    [ADC_CHANNEL_1]  = { .RegInj = LL_ADC_AWD_CHANNEL_1_REG_INJ,  .Reg = LL_ADC_AWD_CHANNEL_1_REG,  .Inj = LL_ADC_AWD_CHANNEL_1_INJ  },
+    [ADC_CHANNEL_2]  = { .RegInj = LL_ADC_AWD_CHANNEL_2_REG_INJ,  .Reg = LL_ADC_AWD_CHANNEL_2_REG,  .Inj = LL_ADC_AWD_CHANNEL_2_INJ  },
+    [ADC_CHANNEL_3]  = { .RegInj = LL_ADC_AWD_CHANNEL_3_REG_INJ,  .Reg = LL_ADC_AWD_CHANNEL_3_REG,  .Inj = LL_ADC_AWD_CHANNEL_3_INJ  },
+    [ADC_CHANNEL_4]  = { .RegInj = LL_ADC_AWD_CHANNEL_4_REG_INJ,  .Reg = LL_ADC_AWD_CHANNEL_4_REG,  .Inj = LL_ADC_AWD_CHANNEL_4_INJ  },
+    [ADC_CHANNEL_5]  = { .RegInj = LL_ADC_AWD_CHANNEL_5_REG_INJ,  .Reg = LL_ADC_AWD_CHANNEL_5_REG,  .Inj = LL_ADC_AWD_CHANNEL_5_INJ  },
+    [ADC_CHANNEL_6]  = { .RegInj = LL_ADC_AWD_CHANNEL_6_REG_INJ,  .Reg = LL_ADC_AWD_CHANNEL_6_REG,  .Inj = LL_ADC_AWD_CHANNEL_6_INJ  },
+    [ADC_CHANNEL_7]  = { .RegInj = LL_ADC_AWD_CHANNEL_7_REG_INJ,  .Reg = LL_ADC_AWD_CHANNEL_7_REG,  .Inj = LL_ADC_AWD_CHANNEL_7_INJ  },
+    [ADC_CHANNEL_8]  = { .RegInj = LL_ADC_AWD_CHANNEL_8_REG_INJ,  .Reg = LL_ADC_AWD_CHANNEL_8_REG,  .Inj = LL_ADC_AWD_CHANNEL_8_INJ  },
+    [ADC_CHANNEL_9]  = { .RegInj = LL_ADC_AWD_CHANNEL_9_REG_INJ,  .Reg = LL_ADC_AWD_CHANNEL_9_REG,  .Inj = LL_ADC_AWD_CHANNEL_9_INJ  },
+    [ADC_CHANNEL_10] = { .RegInj = LL_ADC_AWD_CHANNEL_10_REG_INJ, .Reg = LL_ADC_AWD_CHANNEL_10_REG, .Inj = LL_ADC_AWD_CHANNEL_10_INJ },
+    [ADC_CHANNEL_11] = { .RegInj = LL_ADC_AWD_CHANNEL_11_REG_INJ, .Reg = LL_ADC_AWD_CHANNEL_11_REG, .Inj = LL_ADC_AWD_CHANNEL_11_INJ },
+    [ADC_CHANNEL_12] = { .RegInj = LL_ADC_AWD_CHANNEL_12_REG_INJ, .Reg = LL_ADC_AWD_CHANNEL_12_REG, .Inj = LL_ADC_AWD_CHANNEL_12_INJ },
+    [ADC_CHANNEL_13] = { .RegInj = LL_ADC_AWD_CHANNEL_13_REG_INJ, .Reg = LL_ADC_AWD_CHANNEL_13_REG, .Inj = LL_ADC_AWD_CHANNEL_13_INJ },
+    [ADC_CHANNEL_14] = { .RegInj = LL_ADC_AWD_CHANNEL_14_REG_INJ, .Reg = LL_ADC_AWD_CHANNEL_14_REG, .Inj = LL_ADC_AWD_CHANNEL_14_INJ },
+    [ADC_CHANNEL_15] = { .RegInj = LL_ADC_AWD_CHANNEL_15_REG_INJ, .Reg = LL_ADC_AWD_CHANNEL_15_REG, .Inj = LL_ADC_AWD_CHANNEL_15_INJ },
+    [ADC_CHANNEL_16] = { .RegInj = LL_ADC_AWD_CHANNEL_16_REG_INJ, .Reg = LL_ADC_AWD_CHANNEL_16_REG, .Inj = LL_ADC_AWD_CHANNEL_16_INJ },
+    [ADC_CHANNEL_17] = { .RegInj = LL_ADC_AWD_CHANNEL_17_REG_INJ, .Reg = LL_ADC_AWD_CHANNEL_17_REG, .Inj = LL_ADC_AWD_CHANNEL_17_INJ },
+    [ADC_CHANNEL_18] = { .RegInj = LL_ADC_AWD_CHANNEL_18_REG_INJ, .Reg = LL_ADC_AWD_CHANNEL_18_REG, .Inj = LL_ADC_AWD_CHANNEL_18_INJ },
 };
 
 
@@ -755,7 +820,7 @@ adc_RequestState_t Adc_ChannelInit( adc_PeriphId_t periphId, adc_ChannelConfig_t
  * Stops ongoing regular and injected conversions (Adc_Set_RegStop(), Adc_Set_InjStop()),
  * releases data transfer handler resources (DMA stream, interrupts) and disables the peripheral
  * (Adc_Set_PeriphInactive()). Configuration kept by the module (trigger sources, edges,
- * continuous mode, channel inputs) is reset.
+ * continuous mode, channel inputs, channels of the sequences) is reset.
  *
  * \param periphId [in]: ADC peripheral identification, value from \ref adc_PeriphId_t
  *
@@ -821,6 +886,8 @@ adc_RequestState_t Adc_Deinit( adc_PeriphId_t periphId )
             shadow->RegTriggerMode = ADC_REG_TRIGGER_MODE_SINGLE;
             shadow->InjTriggerId   = ADC_INJ_TRIGGER_SOFTWARE;
             shadow->InjTriggerEdge = ADC_TRIGGER_EDGE_RISING;
+            shadow->RegChannels    = ADC_CHANNEL_MASK_NONE;
+            shadow->InjChannels    = ADC_CHANNEL_MASK_NONE;
 
             for( adc_ChannelId_t channelIdx = ADC_CHANNEL_0; ADC_CHANNEL_CNT > channelIdx; channelIdx ++ )
             {
@@ -1092,6 +1159,12 @@ adc_RequestState_t Adc_Get_ClockDivider( adc_ClkDiv_t * const clkDiv )
  *   (InjTriggerEdge also for ADC_INJ_TRIGGER_AUTO).
  * - InjTriggerId == ADC_INJ_TRIGGER_AUTO (auto-injected mode, JAUTO) requires RegChannelsCnt > 0
  *   and InjTriggerMode == ADC_INJ_TRIGGER_MODE_CONTINUOUS (JAUTO can not be combined with JDISCEN).
+ *   Auto-injected mode of a previous configuration is always cleared (JAUTO = 0) before the regular
+ *   group is configured, it is set again only for InjChannelsCnt > 0 and ADC_INJ_TRIGGER_AUTO.
+ * - A regular discontinuous mode (ADC_REG_TRIGGER_MODE_DISCONT_x) can not be combined with an injected
+ *   group (InjChannelsCnt > 0) in auto-injected mode (ADC_INJ_TRIGGER_AUTO) or in discontinuous mode
+ *   (ADC_INJ_TRIGGER_MODE_SINGLE). The discontinuous modes of a previous configuration are always
+ *   cleared (DISCEN = 0, JDISCEN = 0) before the regular group is configured.
  * - DataConfig: see Adc_Check_DataConfig(). Data transfer handler is initialized last, regular
  *   data transfer starts with Adc_Set_RegStart().
  *
@@ -1190,6 +1263,38 @@ adc_RequestState_t Adc_PeriphInit( adc_PeriphConfig_t * const adcConfig )
             /* Previous step failed */
         }
 
+        /* --- Auto-injected mode of the previous configuration is cleared (ADC_CR1 keeps JAUTO while
+         *     the ADC is disabled), Adc_Set_InjSequencer() sets it again for ADC_INJ_TRIGGER_AUTO --- */
+        if( ADC_REQUEST_OK == retState )
+        {
+            retState = Adc_Set_InjAutoMode( adcConfig->PeriphId, LL_ADC_INJ_TRIG_INDEPENDENT );
+        }
+        else
+        {
+            /* Previous initialization step failed */
+        }
+
+        /* --- Discontinuous modes of the previous configuration are cleared (ADC_CR1 keeps DISCEN / JDISCEN while
+         *     the ADC is disabled and they must not be set for both groups at the same time),
+         *     Adc_Set_TriggerMode() and Adc_Set_InjSequencer() set them again --- */
+        if( ADC_REQUEST_OK == retState )
+        {
+            retState = Adc_Set_RegDiscontMode( adcConfig->PeriphId, LL_ADC_REG_SEQ_DISCONT_DISABLE );
+        }
+        else
+        {
+            /* Previous initialization step failed */
+        }
+
+        if( ADC_REQUEST_OK == retState )
+        {
+            retState = Adc_Set_InjDiscontMode( adcConfig->PeriphId, LL_ADC_INJ_SEQ_DISCONT_DISABLE );
+        }
+        else
+        {
+            /* Previous initialization step failed */
+        }
+
         /* --- Regular group: sequencer, trigger source, trigger edge and conversion mode --- */
         if( ( ADC_REQUEST_OK == retState                  ) &&
             ( 0u             <  adcConfig->RegChannelsCnt )    )
@@ -1249,6 +1354,31 @@ adc_RequestState_t Adc_PeriphInit( adc_PeriphConfig_t * const adcConfig )
         else
         {
             /* Previous step failed */
+        }
+
+        /* --- Channels converted by the regular and the injected group (analog watch-dog channel check) --- */
+        if( ADC_REQUEST_OK == retState )
+        {
+            adc_PeriphShadow_t * const shadow      = &adc_Shadow[ adcConfig->PeriphId ];
+            uint32_t                   regChannels = ADC_CHANNEL_MASK_NONE;
+            uint32_t                   injChannels = ADC_CHANNEL_MASK_NONE;
+
+            for( adc_RegSequenceId_t slotIdx = ADC_REG_SEQUENCE_1; adcConfig->RegChannelsCnt > slotIdx; slotIdx ++ )
+            {
+                regChannels |= ADC_CHANNEL_TO_MASK( adcConfig->RegChannels[ slotIdx ].ChannelId );
+            }
+
+            for( adc_InjSequenceId_t slotIdx = ADC_INJ_SEQUENCE_1; adcConfig->InjChannelsCnt > slotIdx; slotIdx ++ )
+            {
+                injChannels |= ADC_CHANNEL_TO_MASK( adcConfig->InjChannels[ slotIdx ].ChannelId );
+            }
+
+            shadow->RegChannels = regChannels;
+            shadow->InjChannels = injChannels;
+        }
+        else
+        {
+            /* Initialization failed - a taken over peripheral is deinitialized below (channels are cleared) */
         }
 
         /* --- Initialization result --- */
@@ -1424,17 +1554,33 @@ adc_RequestState_t Adc_Get_TriggerSrc( adc_PeriphId_t periphId, adc_RegTriggerId
 
 
 /**
- * \brief Selects single vs. continuous regular group conversion mode
+ * \brief Selects the regular group conversion mode: single, continuous or discontinuous
+ *        (CONT, DISCEN, DISCNUM)
  *
- * \note  Continuous mode (CONT) is written to the HW by Adc_Set_RegStart() and cleared by
- *        Adc_Set_RegStop() - CONT is the stop mechanism of a continuous conversion on STM32F7.
+ * - ADC_REG_TRIGGER_MODE_SINGLE:           DISCEN = 0, CONT = 0 at start - every trigger converts the whole sequence
+ * - ADC_REG_TRIGGER_MODE_CONTINUOUS:       DISCEN = 0, CONT = 1 at start - the sequence is converted repeatedly
+ *                                          after the first trigger
+ * - ADC_REG_TRIGGER_MODE_DISCONT_nRANK(S): DISCEN = 1, DISCNUM = n - 1, CONT = 0 at start - every trigger converts
+ *                                          the next n ranks of the sequence (the last subgroup can be shorter,
+ *                                          the trigger after the end of sequence starts with rank 1)
+ *
+ * \note  DISCEN / DISCNUM are written immediately (with read-back). Continuous mode (CONT) is written to the HW by
+ *        Adc_Set_RegStart() and cleared by Adc_Set_RegStop() - CONT is the stop mechanism of a continuous
+ *        conversion on STM32F7. CONT and DISCEN are never set at the same time.
+ *
+ * \note  With software trigger every Adc_Set_RegStart() converts the next subgroup in discontinuous mode.
  *
  * \pre   No regular or injected conversion may be ongoing on the peripheral. Otherwise
  *        \ref ADC_REQUEST_ERROR is returned and nothing is changed.
  *
+ * \pre   Discontinuous mode requires auto-injected mode disabled (JAUTO = 0, see \ref ADC_INJ_TRIGGER_AUTO) and
+ *        injected discontinuous mode disabled (JDISCEN = 0, see \ref ADC_INJ_TRIGGER_MODE_SINGLE): auto-injected
+ *        and discontinuous modes can not be used simultaneously and discontinuous mode must not be set for the
+ *        regular and the injected group at the same time. Otherwise \ref ADC_REQUEST_ERROR is returned and
+ *        nothing is changed (RM0385 Rev 9 15.3.11, RM0410 Rev 5 15.3.11, RM0431 Rev 4 14.3.11).
+ *
  * \param periphId    [in]: ADC peripheral identification, value from \ref adc_PeriphId_t
  * \param triggerMode [in]: Required conversion mode, value from \ref adc_RegTriggerMode_t
- *                          (ADC_REG_TRIGGER_MODE_SINGLE / ADC_REG_TRIGGER_MODE_CONTINUOUS)
  *
  * \return Function processing state. Returns \ref ADC_REQUEST_OK if request
  *         was processed without problems. Otherwise returns \ref ADC_REQUEST_ERROR.
@@ -1446,17 +1592,42 @@ adc_RequestState_t Adc_Set_TriggerMode( adc_PeriphId_t periphId, adc_RegTriggerM
     if( ( ADC_PERIPH_CNT           > periphId    ) &&
         ( ADC_REG_TRIGGER_MODE_CNT > triggerMode )    )
     {
-        const adc_RequestState_t convState = Adc_Check_ConversionStopped( periphId );
+        ADC_TypeDef * const      periphReg  = adc_PeriphConf[ periphId ].PeriphReg;
+        const adc_RequestState_t convState  = Adc_Check_ConversionStopped( periphId );
+        const uint32_t           llTrigAuto = LL_ADC_INJ_GetTrigAuto( periphReg );
+        const uint32_t           llInjDisc  = LL_ADC_INJ_GetSequencerDiscont( periphReg );
+        const uint32_t           llDiscont  = adc_RegDiscontLut[ triggerMode ];
 
-        if( ADC_REQUEST_OK == convState )
-        {
-            adc_Shadow[ periphId ].RegTriggerMode = triggerMode;
-            retState                              = ADC_REQUEST_OK;
-        }
-        else
+        if( ADC_REQUEST_OK != convState )
         {
             /* Conversion is ongoing, configuration change is not allowed */
             retState = ADC_REQUEST_ERROR;
+        }
+        else if( ( LL_ADC_REG_SEQ_DISCONT_DISABLE   != llDiscont  ) &&
+                 ( LL_ADC_INJ_TRIG_FROM_GRP_REGULAR == llTrigAuto )    )
+        {
+            /* Discontinuous mode (DISCEN) can not be combined with auto-injected mode (JAUTO) */
+            retState = ADC_REQUEST_ERROR;
+        }
+        else if( ( LL_ADC_REG_SEQ_DISCONT_DISABLE != llDiscont ) &&
+                 ( LL_ADC_INJ_SEQ_DISCONT_DISABLE != llInjDisc )    )
+        {
+            /* Discontinuous mode must not be set for the regular and the injected group (JDISCEN) at the same time */
+            retState = ADC_REQUEST_ERROR;
+        }
+        else
+        {
+            retState = Adc_Set_RegDiscontMode( periphId, llDiscont );
+
+            if( ADC_REQUEST_OK == retState )
+            {
+                /* CONT is written from the shadow by Adc_Set_RegStart() */
+                adc_Shadow[ periphId ].RegTriggerMode = triggerMode;
+            }
+            else
+            {
+                /* Discontinuous mode could not be written, the conversion mode is not changed */
+            }
         }
     }
     else
@@ -1469,7 +1640,7 @@ adc_RequestState_t Adc_Set_TriggerMode( adc_PeriphId_t periphId, adc_RegTriggerM
 
 
 /**
- * \brief Reads back the regular group conversion mode (single/continuous)
+ * \brief Reads back the regular group conversion mode (single / continuous / discontinuous)
  *
  * \param periphId     [in]: ADC peripheral identification, value from \ref adc_PeriphId_t
  * \param triggerMode [out]: Pointer to store the current conversion mode (\ref adc_RegTriggerMode_t).
@@ -2652,15 +2823,19 @@ adc_RequestState_t Adc_Get_ChannelInput( adc_PeriphId_t periphId, adc_ChannelId_
 /* -------------------------------------------------------------------------- */
 
 /**
- * \brief Initializes an Analog Watch-dog: monitored channel group, thresholds
+ * \brief Initializes an Analog Watch-dog: monitored channels, thresholds
  *        and event filtering
  *
- * Supported modes (ADC_AWD_1): ADC_AWD_MODE_ALL, ADC_AWD_MODE_ALL_REGULAR,
- * ADC_AWD_MODE_ALL_INJECTED. Filtering: ADC_AWD_FILTER_NONE only.
+ * Supported modes (ADC_AWD_1, \ref adc_AwdConfig_t, RM0385 Rev 9 15.3.8, RM0410 Rev 5 15.3.8, RM0431 Rev 4 14.3.8):
+ * - ADC_AWD_MODE_ALL, ADC_AWD_MODE_ALL_REGULAR, ADC_AWD_MODE_ALL_INJECTED - all channels (of the group),
+ * - ADC_AWD_MODE_SINGLE, ADC_AWD_MODE_SINGLE_REGULAR, ADC_AWD_MODE_SINGLE_INJECTED - the channel
+ *   AwdChannelId (AWDCH, AWDSGL).
+ * Filtering: ADC_AWD_FILTER_NONE only (STM32F7 analog watch-dog has no event filtering).
  *
- * \note  adc_AwdConfig_t carries no channel selector, so ADC_AWD_MODE_SINGLE,
- *        ADC_AWD_MODE_SINGLE_REGULAR and ADC_AWD_MODE_SINGLE_INJECTED cannot be configured
- *        without fabricating a channel choice - reported as an error rather than guessed.
+ * The monitored channel of the single channel modes must be converted in the monitored group
+ * (configured by the last Adc_PeriphInit()): ADC_AWD_MODE_SINGLE - regular or injected sequence,
+ * ADC_AWD_MODE_SINGLE_REGULAR - regular sequence, ADC_AWD_MODE_SINGLE_INJECTED - injected sequence.
+ * The watch-dog compares only converted values, a channel which is not converted is rejected.
  *
  * \pre   No regular or injected conversion may be ongoing on the peripheral. Otherwise
  *        \ref ADC_REQUEST_ERROR is returned and no register is modified.
@@ -2674,8 +2849,8 @@ adc_RequestState_t Adc_Get_ChannelInput( adc_PeriphId_t periphId, adc_ChannelId_
  */
 adc_RequestState_t Adc_AwdInit( adc_PeriphId_t periphId, adc_AwdConfig_t * const awdConfig )
 {
-    adc_RequestState_t retState = ADC_REQUEST_ERROR;
-    uint32_t           llGroup  = LL_ADC_AWD_DISABLE;
+    adc_RequestState_t retState   = ADC_REQUEST_ERROR;
+    uint32_t           llChannels = LL_ADC_AWD_DISABLE;
 
     if( ( ADC_PERIPH_CNT > periphId  ) &&
         ( ADC_NULL_PTR  != awdConfig )    )
@@ -2686,74 +2861,59 @@ adc_RequestState_t Adc_AwdInit( adc_PeriphId_t periphId, adc_AwdConfig_t * const
             ( ADC_AWD_CNT         > awdConfig->AwdId     ) &&
             ( ADC_AWD_FILTER_CNT  > awdConfig->AwdFilter )    )
         {
-            ADC_TypeDef * const periphReg = adc_PeriphConf[ periphId ].PeriphReg;
-
-            if( ADC_AWD_MODE_ALL == awdConfig->AwdMode )
-            {
-                llGroup = LL_ADC_AWD_ALL_CHANNELS_REG_INJ;
-            }
-            else if( ADC_AWD_MODE_ALL_REGULAR == awdConfig->AwdMode )
-            {
-                llGroup = LL_ADC_AWD_ALL_CHANNELS_REG;
-            }
-            else if( ADC_AWD_MODE_ALL_INJECTED == awdConfig->AwdMode )
-            {
-                llGroup = LL_ADC_AWD_ALL_CHANNELS_INJ;
-            }
-            else
-            {
-                /* Single-channel modes need a channel selector which adc_AwdConfig_t does not carry */
-                llGroup = LL_ADC_AWD_DISABLE;
-            }
-
-            if( LL_ADC_AWD_DISABLE != llGroup )
-            {
-                LL_ADC_SetAnalogWDMonitChannels( periphReg, llGroup );
-
-                for( adc_TimeoutCnt_t iterationCnt = 0u; ADC_TIMEOUT_RAW > iterationCnt; iterationCnt ++ )
-                {
-                    const uint32_t regValue = LL_ADC_GetAnalogWDMonitChannels( periphReg );
-
-                    if( llGroup == regValue )
-                    {
-                        retState = ADC_REQUEST_OK;
-                        break;
-                    }
-                    else
-                    {
-                        /* Monitored channel group has not yet been applied, keep return state as error */
-                        retState = ADC_REQUEST_ERROR;
-                    }
-                }
-            }
-            else
-            {
-                retState = ADC_REQUEST_ERROR;
-            }
-
-            /* Register write and read-back verification is done by called functions */
-            if( ADC_REQUEST_OK == retState )
-            {
-                retState = Adc_Set_AwdThresholds( periphId, awdConfig->AwdId, awdConfig->AwdLowThreshold, awdConfig->AwdHighThreshold );
-            }
-            else
-            {
-                /* Previous step failed */
-            }
-
-            if( ADC_REQUEST_OK == retState )
-            {
-                retState = Adc_Set_AwdFilter( periphId, awdConfig->AwdId, awdConfig->AwdFilter );
-            }
-            else
-            {
-                /* Previous step failed */
-            }
+            /* Mode and monitored channel are validated before any register is modified */
+            retState = Adc_Get_AwdChannels( periphId, awdConfig, &llChannels );
         }
         else
         {
             /* Conversion is ongoing or configuration is invalid */
             retState = ADC_REQUEST_ERROR;
+        }
+
+        if( ADC_REQUEST_OK == retState )
+        {
+            ADC_TypeDef * const periphReg = adc_PeriphConf[ periphId ].PeriphReg;
+
+            LL_ADC_SetAnalogWDMonitChannels( periphReg, llChannels );
+
+            for( adc_TimeoutCnt_t iterationCnt = 0u; ADC_TIMEOUT_RAW > iterationCnt; iterationCnt ++ )
+            {
+                const uint32_t regValue = LL_ADC_GetAnalogWDMonitChannels( periphReg );
+
+                if( llChannels == regValue )
+                {
+                    retState = ADC_REQUEST_OK;
+                    break;
+                }
+                else
+                {
+                    /* Monitored channels have not yet been applied, keep return state as error */
+                    retState = ADC_REQUEST_ERROR;
+                }
+            }
+        }
+        else
+        {
+            /* Conversion is ongoing or the configuration is invalid - no register is modified */
+        }
+
+        /* Register write and read-back verification is done by called functions */
+        if( ADC_REQUEST_OK == retState )
+        {
+            retState = Adc_Set_AwdThresholds( periphId, awdConfig->AwdId, awdConfig->AwdLowThreshold, awdConfig->AwdHighThreshold );
+        }
+        else
+        {
+            /* Monitored channels are not configured */
+        }
+
+        if( ADC_REQUEST_OK == retState )
+        {
+            retState = Adc_Set_AwdFilter( periphId, awdConfig->AwdId, awdConfig->AwdFilter );
+        }
+        else
+        {
+            /* Monitored channels or thresholds are not configured */
         }
     }
     else
@@ -3229,6 +3389,40 @@ static adc_RequestState_t Adc_Check_PeriphConfig( const adc_PeriphConfig_t * con
             /* Injected group is not used or is not in auto-injected mode */
         }
 
+        /* Regular discontinuous mode (DISCEN) together with the injected group
+         * (RM0385 Rev 9 15.3.11, RM0410 Rev 5 15.3.11, RM0431 Rev 4 14.3.11) */
+        if( ( ADC_REQUEST_OK == retState ) &&
+            ( 0u             <  regLen   ) &&
+            ( 0u             <  injLen   )    )
+        {
+            const uint32_t llDiscont = adc_RegDiscontLut[ adcConfig->RegTriggerMode ];
+
+            if( LL_ADC_REG_SEQ_DISCONT_DISABLE == llDiscont )
+            {
+                /* Regular group is not converted in discontinuous mode */
+                retState = ADC_REQUEST_OK;
+            }
+            else if( ADC_INJ_TRIGGER_AUTO == adcConfig->InjTriggerId )
+            {
+                /* Auto-injected mode (JAUTO) and discontinuous mode (DISCEN) can not be combined */
+                retState = ADC_REQUEST_ERROR;
+            }
+            else if( ADC_INJ_TRIGGER_MODE_SINGLE == adcConfig->InjTriggerMode )
+            {
+                /* Discontinuous mode must not be set for the regular and the injected group (JDISCEN) at the same time */
+                retState = ADC_REQUEST_ERROR;
+            }
+            else
+            {
+                /* Injected group converts the whole sequence per trigger */
+                retState = ADC_REQUEST_OK;
+            }
+        }
+        else
+        {
+            /* Configuration is already invalid or only one group is used */
+        }
+
         for( adc_ChannelId_t channelIdx = ADC_CHANNEL_0; ADC_CHANNEL_CNT > channelIdx; channelIdx ++ )
         {
             channelTable[ channelIdx ] = ADC_NULL_PTR;
@@ -3584,8 +3778,8 @@ static adc_RequestState_t Adc_Set_InjSequencer( const adc_PeriphConfig_t * const
 /**
  * \brief Selects injected group auto-injected mode (JAUTO)
  *
- * \pre   Called from Adc_Set_InjSequencer() only (validated configuration, no conversion ongoing).
- *        JDISCEN must be cleared before JAUTO is set.
+ * \pre   Called from Adc_PeriphInit() and Adc_Set_InjSequencer() only (validated configuration,
+ *        no conversion ongoing). JDISCEN must be cleared before JAUTO is set.
  *
  * \param periphId   [in]: ADC peripheral identification, value from \ref adc_PeriphId_t
  * \param llTrigAuto [in]: LL_ADC_INJ_TRIG_INDEPENDENT / LL_ADC_INJ_TRIG_FROM_GRP_REGULAR
@@ -3631,8 +3825,8 @@ static adc_RequestState_t Adc_Set_InjAutoMode( adc_PeriphId_t periphId, uint32_t
 /**
  * \brief Selects injected group discontinuous mode (JDISCEN)
  *
- * \pre   Called from Adc_Set_InjSequencer() only (validated configuration, no conversion ongoing).
- *        JAUTO must be cleared before JDISCEN is set.
+ * \pre   Called from Adc_PeriphInit() and Adc_Set_InjSequencer() only (validated configuration, no
+ *        conversion ongoing). JAUTO and DISCEN must be cleared before JDISCEN is set.
  *
  * \param periphId   [in]: ADC peripheral identification, value from \ref adc_PeriphId_t
  * \param llDiscont  [in]: LL_ADC_INJ_SEQ_DISCONT_DISABLE / LL_ADC_INJ_SEQ_DISCONT_1RANK
@@ -3669,6 +3863,130 @@ static adc_RequestState_t Adc_Set_InjDiscontMode( adc_PeriphId_t periphId, uint3
     else
     {
         retState = ADC_REQUEST_ERROR;
+    }
+
+    return ( retState );
+}
+
+
+/**
+ * \brief Selects regular group discontinuous mode (DISCEN, DISCNUM)
+ *
+ * \pre   Called from Adc_PeriphInit() and Adc_Set_TriggerMode() only (validated mode, no conversion ongoing).
+ *        JAUTO and JDISCEN must be cleared before DISCEN is set
+ *        (RM0385 Rev 9 15.3.11, RM0410 Rev 5 15.3.11, RM0431 Rev 4 14.3.11).
+ *
+ * \param periphId  [in]: ADC peripheral identification, value from \ref adc_PeriphId_t
+ * \param llDiscont [in]: LL_ADC_REG_SEQ_DISCONT_DISABLE / LL_ADC_REG_SEQ_DISCONT_1RANK - LL_ADC_REG_SEQ_DISCONT_8RANKS
+ *
+ * \return Function processing state. Returns \ref ADC_REQUEST_OK if request
+ *         was processed without problems. Otherwise returns \ref ADC_REQUEST_ERROR.
+ */
+static adc_RequestState_t Adc_Set_RegDiscontMode( adc_PeriphId_t periphId, uint32_t llDiscont )
+{
+    adc_RequestState_t retState = ADC_REQUEST_ERROR;
+
+    if( ADC_PERIPH_CNT > periphId )
+    {
+        ADC_TypeDef * const periphReg = adc_PeriphConf[ periphId ].PeriphReg;
+
+        LL_ADC_REG_SetSequencerDiscont( periphReg, llDiscont );
+
+        for( adc_TimeoutCnt_t iterationCnt = 0u; ADC_TIMEOUT_RAW > iterationCnt; iterationCnt ++ )
+        {
+            const uint32_t regValue = LL_ADC_REG_GetSequencerDiscont( periphReg );
+
+            if( llDiscont == regValue )
+            {
+                retState = ADC_REQUEST_OK;
+                break;
+            }
+            else
+            {
+                /* Discontinuous mode has not yet been applied, keep return state as error */
+                retState = ADC_REQUEST_ERROR;
+            }
+        }
+    }
+    else
+    {
+        retState = ADC_REQUEST_ERROR;
+    }
+
+    return ( retState );
+}
+
+
+/**
+ * \brief Validates the mode and the monitored channel of analog watch-dog 1 and returns the
+ *        LL encoding of the monitored channels (parameter of LL_ADC_SetAnalogWDMonitChannels())
+ *
+ * See \ref Adc_AwdInit() for the supported modes and the channel rules.
+ *
+ * \param periphId    [in]: ADC peripheral identification (validated by the caller)
+ * \param awdConfig   [in]: Analog watch-dog configuration (not NULL, mode and channel validated here)
+ * \param llChannels [out]: LL encoding of the monitored channels, written only for a valid configuration
+ *
+ * \return Returns \ref ADC_REQUEST_OK for a valid configuration. Otherwise returns \ref ADC_REQUEST_ERROR.
+ */
+static adc_RequestState_t Adc_Get_AwdChannels( adc_PeriphId_t periphId, const adc_AwdConfig_t * const awdConfig, uint32_t * const llChannels )
+{
+    adc_RequestState_t               retState = ADC_REQUEST_ERROR;
+    const adc_PeriphShadow_t * const shadow   = &adc_Shadow[ periphId ];
+    const adc_AwdMode_t              awdMode  = awdConfig->AwdMode;
+
+    if( ADC_AWD_MODE_ALL == awdMode )
+    {
+        *llChannels = LL_ADC_AWD_ALL_CHANNELS_REG_INJ;
+        retState    = ADC_REQUEST_OK;
+    }
+    else if( ADC_AWD_MODE_ALL_REGULAR == awdMode )
+    {
+        *llChannels = LL_ADC_AWD_ALL_CHANNELS_REG;
+        retState    = ADC_REQUEST_OK;
+    }
+    else if( ADC_AWD_MODE_ALL_INJECTED == awdMode )
+    {
+        *llChannels = LL_ADC_AWD_ALL_CHANNELS_INJ;
+        retState    = ADC_REQUEST_OK;
+    }
+    else if( ADC_CHANNEL_CNT <= awdConfig->AwdChannelId )
+    {
+        /* Invalid monitored channel (or invalid mode) */
+        retState = ADC_REQUEST_ERROR;
+    }
+    else
+    {
+        const uint32_t                        channelMask  = ADC_CHANNEL_TO_MASK( awdConfig->AwdChannelId );
+        const uint32_t                        convChannels = shadow->RegChannels | shadow->InjChannels;
+        const adc_Awd1ChannelConfig_t * const llChannel    = &adc_Awd1ChannelLut[ awdConfig->AwdChannelId ];
+
+        if( ( ADC_AWD_MODE_SINGLE   == awdMode                        ) &&
+            ( ADC_CHANNEL_MASK_NONE != ( channelMask & convChannels ) )    )
+        {
+            /* Channel converted by the regular or the injected group */
+            *llChannels = llChannel->RegInj;
+            retState    = ADC_REQUEST_OK;
+        }
+        else if( ( ADC_AWD_MODE_SINGLE_REGULAR == awdMode                               ) &&
+                 ( ADC_CHANNEL_MASK_NONE       != ( channelMask & shadow->RegChannels ) )    )
+        {
+            /* Channel converted by the regular group */
+            *llChannels = llChannel->Reg;
+            retState    = ADC_REQUEST_OK;
+        }
+        else if( ( ADC_AWD_MODE_SINGLE_INJECTED == awdMode                               ) &&
+                 ( ADC_CHANNEL_MASK_NONE        != ( channelMask & shadow->InjChannels ) )    )
+        {
+            /* Channel converted by the injected group */
+            *llChannels = llChannel->Inj;
+            retState    = ADC_REQUEST_OK;
+        }
+        else
+        {
+            /* Channel is not converted by the monitored group or the mode is invalid */
+            retState = ADC_REQUEST_ERROR;
+        }
     }
 
     return ( retState );
