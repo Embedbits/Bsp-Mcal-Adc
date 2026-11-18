@@ -121,6 +121,41 @@ Integration tests are prepared for the STM32H7 Nucleo boards (run together with 
 
 ---
 
+## Regular group conversion modes
+
+`adc_PeriphConfig_t.RegTriggerMode` and `Adc_Set_TriggerMode()` / `Adc_Get_TriggerMode()` select the conversion mode of the regular group (ADC_CFGR bits CONT, DISCEN, DISCNUM[2:0]; STM32H7: RM0433 Rev 9 25.4.21 and 25.6.4, the same in RM0399 Rev 5 chapter 26, RM0455 Rev 13 chapter 27 and RM0468 Rev 3 chapter 28; STM32H7R / H7S: RM0477 Rev 10 27.4.20 and 27.7.4):
+
+| `adc_RegTriggerMode_t` | ADC_CFGR | Behavior |
+|---|---|---|
+| `ADC_REG_TRIGGER_MODE_SINGLE` | CONT = 0, DISCEN = 0 | every trigger converts the whole sequence |
+| `ADC_REG_TRIGGER_MODE_CONTINUOUS` | CONT = 1, DISCEN = 0 | after the first trigger the sequence is converted repeatedly |
+| `ADC_REG_TRIGGER_MODE_DISCONT_1RANK` - `ADC_REG_TRIGGER_MODE_DISCONT_8RANKS` | CONT = 0, DISCEN = 1, DISCNUM = n - 1 | every trigger converts the next n ranks (subgroup) of the sequence |
+
+In discontinuous mode the last subgroup of the sequence can have less than n ranks (no rollover), the end of sequence flag (`ADC_FLAG_REG_EOS`) is set after the last rank and the next trigger starts with rank 1 again. The data transfer continues at the current buffer position.
+
+- Software trigger: on STM32H7R / H7S every `Adc_Set_RegStart()` converts one subgroup (ADSTART is cleared by the ADC at the end of the subgroup, RM0477 Rev 10 27.4.15). On STM32H7 (16-bit ADC) the reference manual states that ADSTART is cleared at the end of conversion (EOC = 1) in discontinuous mode with software trigger (RM0433 Rev 9 25.4.16); the next subgroup is started by `Adc_Set_RegStart()`, the integration test uses 1 rank per trigger.
+- CONT and DISCEN are never set at the same time (forbidden by the reference manual); the bit which is cleared is written first.
+- Discontinuous mode can not be combined with auto-injected mode (`ADC_INJ_TRIGGER_AUTO`, JAUTO): `Adc_PeriphInit()` rejects the configuration and `Adc_Set_TriggerMode()` rejects a discontinuous mode while JAUTO is set.
+- `Adc_PeriphInit()` clears the auto-injected mode of a previous configuration before the regular group is configured.
+
+---
+
+## Analog watch-dog channel selection
+
+`Adc_AwdInit()` selects the monitored channels by `adc_AwdConfig_t.AwdMode` (ADC_CFGR AWD1CH / AWD1SGL / AWD1EN / JAWD1EN, ADC_AWD2CR / ADC_AWD3CR; STM32H7: RM0433 Rev 9 25.4.30, 25.6.19 and 25.6.20, the same in RM0399 Rev 5 chapter 26, RM0455 Rev 13 chapter 27 and RM0468 Rev 3 chapter 28; STM32H7R / H7S: RM0477 Rev 10 27.4.29, 27.7.19 and 27.7.20):
+
+| Watch-dog | `ADC_AWD_MODE_ALL` | `_ALL_REGULAR` / `_ALL_INJECTED` | `ADC_AWD_MODE_SINGLE` | `_SINGLE_REGULAR` / `_SINGLE_INJECTED` |
+|---|---|---|---|---|
+| `ADC_AWD_1` | all channels | all channels of the group | channel `AwdChannelId` (regular or injected) | channel `AwdChannelId` of the group |
+| `ADC_AWD_2`, `ADC_AWD_3` | all channels | rejected | channels of `AwdChannelMask` (regular or injected) | rejected |
+
+- `adc_AwdChannelMask_t` is a channel set (bit n = channel n) built from the constants `ADC_AWD_CHANNEL_MASK_n` combined by bitwise OR (`ADC_AWD_CHANNEL_MASK_ALL`, `ADC_AWD_CHANNEL_MASK_NONE`): channels 0 - 19 on STM32H7 (AWDxCH[19:0]), channels 0 - 18 on STM32H7R / H7S (AWDxCH[18:0], AWD1CH values above 18 are reserved - channel 19 of `adc_ChannelId_t` has no input there). It is a type definition with symbolic constants, not an enumeration (MISRA - an OR of enumeration constants is not a value of the enumeration).
+- The monitored channels must be converted in the monitored group of the last `Adc_PeriphInit()` (the reference manuals require the channels selected by AWD1CH / AWDxCH also in the sequence registers); an empty channel set (it disables AWD2 / AWD3) is rejected. After `Adc_Deinit()` the single channel modes are rejected until the next `Adc_PeriphInit()`.
+- `AwdChannelId` and `AwdChannelMask` are used only by the modes above, the other field is ignored.
+- Device errata "ADC_AWDy_OUT reset by non-guarded channels" (ES0392 Rev 15, ES0445 Rev 6, ES0478 Rev 12, ES0491 Rev 9, ES0596 Rev 10) concern only the ADC_AWDy_OUT signal routed to the timers, not the watch-dog flags.
+
+---
+
 ## Usage Notes
 
 - `Adc_Init()` configures the common clock first - all ADC peripherals must be disabled. Peripherals without regular and injected channels are not touched.
@@ -162,6 +197,7 @@ if( ADC_REQUEST_OK == Adc_Init( &config ) )
 - STM32H7R / H7S: `Tests/UnitTests/Test_Adc_H7RS.c` (selected by `MCU_FAMILY_ID` STM32H7RSxx) - tests of the STM32H5 module
   with the STM32H7R / H7S device data (RCC ADC12 sources, ADC1_2 line, no channel 0 switch), GPDMA mock.
 - Integration tests (target, STM32H7 Nucleo boards, NUCLEO-H7S3L8): AB#889.
+  The divider tests use two resistor dividers of the common board wiring (fixture feature `ADC_DIVIDERS`): PA0 (10k to +3V3 / 4.7k to GND) and PC0 (4.7k / 10k) on ADC1 (NUCLEO-H7A3ZI-Q, NUCLEO-H723ZG, NUCLEO-H755ZI-Q channels 16 and 10; NUCLEO-H7S3L8 channels 0 and 10); the ratio of the result to the full scale is checked independent of VDDA. On a board with a fixture without the feature the divider tests are ignored; a board without a fixture is expected to have the dividers.
 
 ---
 

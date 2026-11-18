@@ -48,6 +48,7 @@ else()
                         Adc_Lib             # Module under test
                         Dma_Lib             # DMA stream of the ADC
                         Dac_Lib             # Source of the converted signals
+                        Eth_Lib             # Power-down of the Ethernet PHY (dividers, AB#2248)
         TIMEOUT         60
     )
 
