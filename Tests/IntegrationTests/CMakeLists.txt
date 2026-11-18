@@ -1,11 +1,13 @@
 #===================== Integration tests configuration ========================#
-# Integration tests of Adc module on target (NUCLEO-G474RE). Registered in module
+# Integration tests of Adc module on target (NUCLEO-G474RE, NUCLEO-G431RB, NUCLEO-G491RE). Registered in module
 # CMakeLists.txt by IntegrationTesting_AddPath() and created by
 # IntegrationTesting_Generate() in "IntegrationTest" build
 # (see EmBi_Platform/CMake/IntegrationTesting/README.md).
 #
 # Internal channels (VREFINT, temperature sensor) are converted, DAC1_OUT1 (PA4)
-# is measured by ADC2 channel 17 (same pin) through Dac module. No wiring is needed.
+# is measured by ADC2 channel 17 (same pin) through Dac module. No wiring is needed for them.
+# The divider tests use the dividers of the common board wiring on PA0 (ADC1 channel 1) and
+# PC0 (ADC1 channel 6): fixture feature ADC_DIVIDERS.
 #
 # The test set is independent - target interface (entry point, initialization,
 # fault handlers, system reset) is implemented by ItTarget_Adc.c and
